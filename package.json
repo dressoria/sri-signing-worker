@@ -1,0 +1,24 @@
+{
+  "name": "sri-signing-worker",
+  "version": "0.1.0",
+  "description": "Appsolux SRI signing job worker — processes queued SriSigningJob records",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "ts-node src/index.ts",
+    "scan": "ts-node src/index.ts scan",
+    "run:once": "ts-node src/index.ts run:once",
+    "check-env": "ts-node src/index.ts check-env"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
