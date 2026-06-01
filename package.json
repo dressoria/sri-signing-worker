@@ -11,7 +11,8 @@
     "run:once": "ts-node src/index.ts run:once",
     "scan:submission": "ts-node src/index.ts scan:submission",
     "submit:once": "ts-node src/index.ts submit:once",
-    "check-env": "ts-node src/index.ts check-env"
+    "check-env": "ts-node src/index.ts check-env",
+    "test:xades-skeleton": "ts-node src/test-xades-skeleton.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

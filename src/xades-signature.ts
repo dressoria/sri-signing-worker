@@ -21,6 +21,13 @@ const ALG_ENVELOPED = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
 const TYPE_SIGNED_PROPS = "http://uri.etsi.org/01903#SignedProperties";
 const NS_XMLDSIG = "http://www.w3.org/2000/09/xmldsig#";
 const NS_XADES = "http://uri.etsi.org/01903/v1.3.2#";
+const SIGNATURE_ID = "Signature";
+const SIGNED_INFO_ID = "Signature-SignedInfo";
+const SIGNED_PROPERTIES_ID = "Signature-SignedProperties";
+const KEY_INFO_ID = "Signature-KeyInfo";
+const OBJECT_ID = "Signature-Object";
+const SIGNED_PROPERTIES_REF_URI = `#${SIGNED_PROPERTIES_ID}`;
+const SIGNED_PROPERTIES_REF_XPATH = `//*[@Id='${SIGNED_PROPERTIES_ID}' or @ID='${SIGNED_PROPERTIES_ID}' or @id='${SIGNED_PROPERTIES_ID}']`;
 
 // ── Tipos públicos ────────────────────────────────────────────────────────────
 
@@ -97,6 +104,92 @@ function parseXmlDoc(xmlString: string): Document {
   }
 
   return doc;
+}
+
+function getElementLocalName(node: Node | null): string | null {
+  if (!node || node.nodeType !== node.ELEMENT_NODE) return null;
+  const el = node as Element;
+  return el.localName || el.nodeName.split(":").pop() || null;
+}
+
+function getElementIdValue(element: Element): string | null {
+  return element.getAttribute("Id") ?? element.getAttribute("ID") ?? element.getAttribute("id");
+}
+
+export function findXmlElementById(doc: Document, id: string): Element | null {
+  const nodes = doc.getElementsByTagName("*");
+  for (let index = 0; index < nodes.length; index += 1) {
+    const candidate = nodes[index];
+    if (!candidate) continue;
+    const candidateId = getElementIdValue(candidate);
+    if (candidateId === id) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function listElementIds(doc: Document): Array<{ localName: string; id: string }> {
+  const ids: Array<{ localName: string; id: string }> = [];
+  const nodes = doc.getElementsByTagName("*");
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (!node) continue;
+    const id = getElementIdValue(node);
+    if (!id) continue;
+    ids.push({
+      localName: getElementLocalName(node) ?? node.nodeName,
+      id,
+    });
+  }
+  return ids;
+}
+
+function listChildElementLocalNames(element: Element | null): string[] {
+  if (!element) return [];
+  const names: string[] = [];
+  for (let index = 0; index < element.childNodes.length; index += 1) {
+    const child = element.childNodes[index];
+    const localName = getElementLocalName(child);
+    if (localName) names.push(localName);
+  }
+  return names;
+}
+
+function sanitizeSkeletonSnippet(xml: string): string {
+  return xml
+    .replace(/>\s+</g, "><")
+    .replace(/<X509Certificate>[\s\S]*?<\/X509Certificate>/g, "<X509Certificate>[REDACTED]</X509Certificate>")
+    .slice(0, 800);
+}
+
+function validateXadesSkeletonDoc(doc: Document, xmlWithSkeleton: string): void {
+  const signatureEl = findXmlElementById(doc, SIGNATURE_ID);
+  const signedPropsEl = findXmlElementById(doc, SIGNED_PROPERTIES_ID);
+  const ids = listElementIds(doc);
+  const signatureChildNames = listChildElementLocalNames(signatureEl);
+  const objectEl = findXmlElementById(doc, OBJECT_ID);
+  const keyInfoEl = findXmlElementById(doc, KEY_INFO_ID);
+
+  const qualifyingPropsEl = doc.getElementsByTagNameNS(NS_XADES, "QualifyingProperties")[0] ?? null;
+  const signedInfoEl = doc.getElementsByTagNameNS(NS_XMLDSIG, "SignedInfo")[0] ?? null;
+
+  const missingParts: string[] = [];
+  if (!signatureEl) missingParts.push("Signature");
+  if (!signedInfoEl) missingParts.push("SignedInfo");
+  if (!keyInfoEl) missingParts.push("KeyInfo");
+  if (!objectEl) missingParts.push("Object");
+  if (!qualifyingPropsEl) missingParts.push("QualifyingProperties");
+  if (!signedPropsEl) missingParts.push("SignedProperties");
+
+  if (missingParts.length > 0) {
+    throw new Error(
+      `XADES_SKELETON_INVALID: Faltan nodos requeridos (${missingParts.join(", ")}). ` +
+        `IDs encontrados: ${ids.map((item) => `${item.localName}#${item.id}`).join(", ") || "ninguno"}. ` +
+        `Hijos directos de Signature: ${signatureChildNames.join(", ") || "ninguno"}. ` +
+        `Skeleton: ${sanitizeSkeletonSnippet(xmlWithSkeleton)}`
+    );
+  }
 }
 
 // ── Carga de certificado PKCS#12 ──────────────────────────────────────────────
@@ -215,8 +308,8 @@ function buildQualifyingPropertiesXml(params: {
   const { signingTime, certDigestBase64, issuerName, serialNumber } = params;
 
   return (
-    `<etsi:QualifyingProperties xmlns:etsi="${NS_XADES}" Target="#Signature">` +
-    `<etsi:SignedProperties Id="Signature-SignedProperties">` +
+    `<etsi:QualifyingProperties xmlns:etsi="${NS_XADES}" Target="#${SIGNATURE_ID}">` +
+    `<etsi:SignedProperties Id="${SIGNED_PROPERTIES_ID}">` +
     `<etsi:SignedSignatureProperties>` +
     `<etsi:SigningTime>${signingTime}</etsi:SigningTime>` +
     `<etsi:SigningCertificate>` +
@@ -239,8 +332,23 @@ function buildQualifyingPropertiesXml(params: {
 
 function buildSignatureSkeletonXml(qualifyingPropsXml: string): string {
   return (
-    `<Signature xmlns="${NS_XMLDSIG}" Id="Signature">` +
-    `<Object>${qualifyingPropsXml}</Object>` +
+    `<Signature xmlns="${NS_XMLDSIG}" Id="${SIGNATURE_ID}">` +
+    `<SignedInfo Id="${SIGNED_INFO_ID}">` +
+    `<CanonicalizationMethod Algorithm="${ALG_C14N}"/>` +
+    `<SignatureMethod Algorithm="${ALG_RSA_SHA256}"/>` +
+    `<Reference URI="#comprobante">` +
+    `<Transforms><Transform Algorithm="${ALG_ENVELOPED}"/></Transforms>` +
+    `<DigestMethod Algorithm="${ALG_SHA256}"/>` +
+    `<DigestValue></DigestValue>` +
+    `</Reference>` +
+    `<Reference URI="${SIGNED_PROPERTIES_REF_URI}" Type="${TYPE_SIGNED_PROPS}">` +
+    `<DigestMethod Algorithm="${ALG_SHA256}"/>` +
+    `<DigestValue></DigestValue>` +
+    `</Reference>` +
+    `</SignedInfo>` +
+    `<SignatureValue></SignatureValue>` +
+    `<KeyInfo Id="${KEY_INFO_ID}"></KeyInfo>` +
+    `<Object Id="${OBJECT_ID}">${qualifyingPropsXml}</Object>` +
     `</Signature>`
   );
 }
@@ -257,7 +365,7 @@ function buildSignedInfoXml(docDigestBase64: string, signedPropsDigestBase64: st
     `<DigestMethod Algorithm="${ALG_SHA256}"/>` +
     `<DigestValue>${docDigestBase64}</DigestValue>` +
     `</Reference>` +
-    `<Reference URI="#Signature-SignedProperties" Type="${TYPE_SIGNED_PROPS}">` +
+    `<Reference URI="${SIGNED_PROPERTIES_REF_URI}" Type="${TYPE_SIGNED_PROPS}">` +
     `<DigestMethod Algorithm="${ALG_SHA256}"/>` +
     `<DigestValue>${signedPropsDigestBase64}</DigestValue>` +
     `</Reference>` +
@@ -274,15 +382,15 @@ function buildFinalSignatureXml(params: {
   const { signedInfoXml, signatureValueBase64, certDerBase64, qualifyingPropsXml } = params;
 
   return (
-    `<Signature xmlns="${NS_XMLDSIG}" Id="Signature">` +
+    `<Signature xmlns="${NS_XMLDSIG}" Id="${SIGNATURE_ID}">` +
     signedInfoXml.replace(` xmlns="${NS_XMLDSIG}"`, "") + // xmlns already on parent
     `<SignatureValue>${signatureValueBase64}</SignatureValue>` +
-    `<KeyInfo>` +
+    `<KeyInfo Id="${KEY_INFO_ID}">` +
     `<X509Data>` +
     `<X509Certificate>${certDerBase64}</X509Certificate>` +
     `</X509Data>` +
     `</KeyInfo>` +
-    `<Object>${qualifyingPropsXml}</Object>` +
+    `<Object Id="${OBJECT_ID}">${qualifyingPropsXml}</Object>` +
     `</Signature>`
   );
 }
@@ -319,18 +427,19 @@ export function signXmlWithTenantCertificate(
   );
 
   const fullDoc = parseXmlDoc(xmlWithSkeleton);
+  validateXadesSkeletonDoc(fullDoc, xmlWithSkeleton);
 
-  // Find the SignedProperties element by Id
-  const signedPropsEl = fullDoc.getElementById("Signature-SignedProperties");
+  // Find the SignedProperties element by Id using XML-safe lookup.
+  const signedPropsEl = findXmlElementById(fullDoc, SIGNED_PROPERTIES_ID);
   if (!signedPropsEl) {
     throw new Error(
-      "No se encontró el elemento #Signature-SignedProperties en el documento con skeleton. " +
-        "Verifica que el XML del documento tiene un tag de cierre limpio."
+      "No se encontró el elemento Signature-SignedProperties en el documento con skeleton. " +
+        `IDs encontrados: ${listElementIds(fullDoc).map((item) => `${item.localName}#${item.id}`).join(", ") || "ninguno"}.`
     );
   }
 
   // Get ancestor namespace declarations for correct C14N
-  const ancestorNs = findAncestorNs(fullDoc, "//*[@Id='Signature-SignedProperties']");
+  const ancestorNs = findAncestorNs(fullDoc, SIGNED_PROPERTIES_REF_XPATH);
 
   const c14nSignedProps = c14nNode(
     signedPropsEl as unknown as Node,
@@ -422,6 +531,10 @@ export function validateSignedXmlBasic(signedXml: string): {
     errors.push("No se encontró el elemento XAdES SignedProperties.");
   }
 
+  if (!signedXml.includes(`URI="${SIGNED_PROPERTIES_REF_URI}"`)) {
+    errors.push("No se encontró la referencia URI del SignedProperties.");
+  }
+
   if (!signedXml.includes("<etsi:SigningTime>")) {
     errors.push("No se encontró <etsi:SigningTime> en QualifyingProperties.");
   }
@@ -452,4 +565,32 @@ function getRootTagName(xml: string): string {
 
 export function calculateSha256(content: Buffer | string): string {
   return sha256hex(content);
+}
+
+export function debugValidateXadesSkeleton(unsignedXml: string): {
+  foundSignedProperties: boolean;
+  foundReferenceUri: boolean;
+  foundIds: Array<{ localName: string; id: string }>;
+} {
+  const qualifyingPropsXml = buildQualifyingPropertiesXml({
+    signingTime: "2026-06-01T00:00:00Z",
+    certDigestBase64: Buffer.from("dummy-cert-digest").toString("base64"),
+    issuerName: "CN=Dummy Issuer",
+    serialNumber: "123456789",
+  });
+
+  const skeletonSig = buildSignatureSkeletonXml(qualifyingPropsXml);
+  const closingTag = `</${getRootTagName(unsignedXml)}>`;
+  const xmlWithSkeleton = unsignedXml.trimEnd().replace(
+    new RegExp(`${closingTag}\\s*$`),
+    skeletonSig + closingTag
+  );
+  const doc = parseXmlDoc(xmlWithSkeleton);
+  validateXadesSkeletonDoc(doc, xmlWithSkeleton);
+
+  return {
+    foundSignedProperties: Boolean(findXmlElementById(doc, SIGNED_PROPERTIES_ID)),
+    foundReferenceUri: xmlWithSkeleton.includes(`URI="${SIGNED_PROPERTIES_REF_URI}"`),
+    foundIds: listElementIds(doc),
+  };
 }
