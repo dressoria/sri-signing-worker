@@ -12,6 +12,10 @@ type AuthorizationMessage = {
   tipo?: string;
 };
 
+const SOAP_ENV_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/";
+const SRI_RECEPCION_NAMESPACE = "http://ec.gob.sri.ws.recepcion";
+const SRI_AUTORIZACION_NAMESPACE = "http://ec.gob.sri.ws.autorizacion";
+
 export type SRIReceptionResult =
   | {
       kind: "RECIBIDA";
@@ -91,14 +95,41 @@ function parseMessages(blocks: string[]): ReceiptMessage[] {
   }));
 }
 
-async function postSoap(url: string, actionBody: string): Promise<string> {
-  const body = `<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="ec.gob.sri.ws.recepcion">
+function sanitizeSoapFaultText(xml: string): string {
+  const faultString =
+    extractFirstTag(xml, "faultstring") ??
+    extractFirstTag(xml, "faultcode") ??
+    extractFirstTag(xml, "message");
+
+  if (faultString) {
+    return faultString.replace(/\s+/g, " ").trim().slice(0, 300);
+  }
+
+  return xml.replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+export function buildReceptionSoapEnvelope(actionBody: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="${SOAP_ENV_NAMESPACE}" xmlns:ec="${SRI_RECEPCION_NAMESPACE}">
   <soapenv:Header/>
   <soapenv:Body>
     ${actionBody}
   </soapenv:Body>
 </soapenv:Envelope>`;
+}
+
+export function buildAuthorizationSoapEnvelope(actionBody: string): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="${SOAP_ENV_NAMESPACE}" xmlns:ec="${SRI_AUTORIZACION_NAMESPACE}">
+  <soapenv:Header/>
+  <soapenv:Body>
+    ${actionBody}
+  </soapenv:Body>
+</soapenv:Envelope>`;
+}
+
+async function postSoap(url: string, actionBody: string): Promise<string> {
+  const body = buildReceptionSoapEnvelope(actionBody);
 
   const response = await fetch(stripWsdl(url), {
     method: "POST",
@@ -110,19 +141,13 @@ async function postSoap(url: string, actionBody: string): Promise<string> {
 
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`SRI reception HTTP ${response.status}: ${text.slice(0, 300)}`);
+    throw new Error(`SRI reception HTTP ${response.status}: ${sanitizeSoapFaultText(text)}`);
   }
   return text;
 }
 
 async function postAuthorizationSoap(url: string, actionBody: string): Promise<string> {
-  const body = `<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="ec.gob.sri.ws.autorizacion">
-  <soapenv:Header/>
-  <soapenv:Body>
-    ${actionBody}
-  </soapenv:Body>
-</soapenv:Envelope>`;
+  const body = buildAuthorizationSoapEnvelope(actionBody);
 
   const response = await fetch(stripWsdl(url), {
     method: "POST",
@@ -134,7 +159,7 @@ async function postAuthorizationSoap(url: string, actionBody: string): Promise<s
 
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`SRI authorization HTTP ${response.status}: ${text.slice(0, 300)}`);
+    throw new Error(`SRI authorization HTTP ${response.status}: ${sanitizeSoapFaultText(text)}`);
   }
   return text;
 }

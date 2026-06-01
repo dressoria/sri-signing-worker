@@ -12,7 +12,8 @@
     "scan:submission": "ts-node src/index.ts scan:submission",
     "submit:once": "ts-node src/index.ts submit:once",
     "check-env": "ts-node src/index.ts check-env",
-    "test:xades-skeleton": "ts-node src/test-xades-skeleton.ts"
+    "test:xades-skeleton": "ts-node src/test-xades-skeleton.ts",
+    "test:sri-soap-envelope": "ts-node src/test-sri-soap-envelope.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
