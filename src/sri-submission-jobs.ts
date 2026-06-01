@@ -154,38 +154,50 @@ export async function markSubmissionReceived(params: {
   const now = new Date();
   const pollAfter = new Date(now.getTime() + (params.pollAfterMs ?? 30_000));
 
-  const rows = await query<RawSubmissionJobRow>(
-    `UPDATE "SriSubmissionJob"
-     SET
-       status = 'RECEIVED',
-       "receivedAt" = COALESCE("receivedAt", $1),
-       "lockedAt" = NULL,
-       "lockedBy" = NULL,
-       "runAfter" = $2,
-       "sriReceiptStatus" = $3,
-       "sriAccessKey" = $4,
-       "sriResponseRaw" = $5::jsonb,
-       "updatedAt" = $1
-     WHERE id = $6
-     RETURNING *`,
-    [
-      now.toISOString(),
-      pollAfter.toISOString(),
-      params.sriReceiptStatus,
-      params.sriAccessKey,
-      JSON.stringify(params.sriResponseRaw),
-      params.jobId,
-    ]
-  );
+  return withTransaction(async (client: PoolClient) => {
+    const updated = await client.query<RawSubmissionJobRow>(
+      `UPDATE "SriSubmissionJob"
+       SET
+         status = 'RECEIVED',
+         "receivedAt" = COALESCE("receivedAt", $1),
+         "lockedAt" = NULL,
+         "lockedBy" = NULL,
+         "runAfter" = $2,
+         "sriReceiptStatus" = $3,
+         "sriAccessKey" = $4,
+         "sriResponseRaw" = $5::jsonb,
+         "updatedAt" = $1
+       WHERE id = $6
+       RETURNING *`,
+      [
+        now.toISOString(),
+        pollAfter.toISOString(),
+        params.sriReceiptStatus,
+        params.sriAccessKey,
+        JSON.stringify(params.sriResponseRaw),
+        params.jobId,
+      ]
+    );
 
-  if (rows.length === 0) throw new Error(`Submission job no encontrado: ${params.jobId}`);
+    if (updated.rows.length === 0) {
+      throw new Error(`Submission job no encontrado: ${params.jobId}`);
+    }
 
-  logger.info("Submission job marcado RECEIVED.", {
-    jobId: params.jobId,
-    sriReceiptStatus: params.sriReceiptStatus,
+    const job = updated.rows[0]!;
+    await client.query(
+      `UPDATE "SriDocument"
+       SET status = 'SENT', "updatedAt" = $1
+       WHERE id = $2 AND "tenantId" = $3 AND status IN ('SIGNED', 'SENT')`,
+      [now.toISOString(), job.documentId, job.tenantId]
+    );
+
+    logger.info("Submission job marcado RECEIVED.", {
+      jobId: params.jobId,
+      sriReceiptStatus: params.sriReceiptStatus,
+    });
+
+    return mapJob(job);
   });
-
-  return mapJob(rows[0]!);
 }
 
 export async function markSubmissionAuthorized(params: {

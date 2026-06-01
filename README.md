@@ -30,7 +30,7 @@ Worker de firma electrónica SRI para Appsolux. Procesa `SriSigningJob` de la ba
 
 ## Qué NO hace
 
-- **NO** envía al web service del SRI (no autoriza comprobantes).
+- **NO** envía a produccion SRI; solo soporta `TEST`.
 - **NO** genera RIDE oficial.
 - **NO** envía correos.
 - **NO** ejecuta en loop infinito (se usa con cron o manualmente).
@@ -79,6 +79,12 @@ npm run scan
 
 # Reclamar y procesar 1 job, luego terminar
 npm run run:once
+
+# Listar submission jobs de envio SRI TEST
+npm run scan:submission
+
+# Procesar 1 submission job, luego terminar
+npm run submit:once
 
 # Type-check
 npm run typecheck
@@ -157,10 +163,19 @@ DB SriSigningJob { status: QUEUED }
 7. Ejecuta `npm run run:once`.
 8. Verifica el XML firmado en `SRI_SIGNED_XML_STORAGE_PATH`.
 
+## Submission SRI TEST
+
+Cuando `ENABLE_SRI_TEST_SUBMISSION=true`, el worker tambien puede:
+
+1. Reclamar `SriSubmissionJob` en estado `QUEUED` o `RECEIVED`.
+2. Leer `signed.xml` desde `SRI_SIGNED_XML_STORAGE_PATH`.
+3. Enviar el XML firmado al web service de recepcion SRI TEST.
+4. Consultar autorizacion en el web service de autorizacion SRI TEST.
+5. Actualizar `SriDocument.status` a `SENT`, `AUTHORIZED` o `REJECTED`.
+
 ## Limitaciones actuales
 
-- XAdES-BES implementado pero no verificado contra el web service del SRI todavía.
-- No envía al SRI (próxima fase).
+- XAdES-BES implementado y fase `TEST` de submission habilitada, pero no cubre produccion SRI.
 - No genera RIDE (próxima fase).
 - El loop de polling continuo no está implementado (ejecutar con cron o manualmente).
 
