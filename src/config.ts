@@ -37,6 +37,9 @@ export type WorkerConfig = {
   certEncryptionKey: string | null;
   certStoragePath: string | null;
   signedXmlStoragePath: string | null;
+  enableSriTestSubmission: boolean;
+  sriTestReceptionUrl: string | null;
+  sriTestAuthorizationUrl: string | null;
 };
 
 let _config: WorkerConfig | null = null;
@@ -57,6 +60,13 @@ export function getConfig(): WorkerConfig {
   const signedXmlStoragePath =
     process.env["SRI_SIGNED_XML_STORAGE_PATH"]?.trim() ||
     (certStoragePath ? certStoragePath + "/signed-xml" : null);
+  const enableSriTestSubmission = boolEnv("ENABLE_SRI_TEST_SUBMISSION", false);
+  const sriTestReceptionUrl =
+    process.env["SRI_TEST_RECEPCION_URL"]?.trim() ||
+    "https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline";
+  const sriTestAuthorizationUrl =
+    process.env["SRI_TEST_AUTORIZACION_URL"]?.trim() ||
+    "https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline";
 
   // When real signing is enabled, validate that required secrets are present
   if (enableRealSriSigning) {
@@ -80,6 +90,20 @@ export function getConfig(): WorkerConfig {
     }
   }
 
+  if (enableSriTestSubmission) {
+    if (!signedXmlStoragePath) {
+      throw new Error(
+        "ENABLE_SRI_TEST_SUBMISSION=true requiere SRI_SIGNED_XML_STORAGE_PATH " +
+          "(o SRI_CERT_STORAGE_PATH) configurada para leer los XML firmados."
+      );
+    }
+    if (!sriTestReceptionUrl || !sriTestAuthorizationUrl) {
+      throw new Error(
+        "ENABLE_SRI_TEST_SUBMISSION=true requiere URLs de recepcion y autorizacion del SRI TEST."
+      );
+    }
+  }
+
   _config = {
     databaseUrl,
     databaseUrlSanitized: sanitizeDatabaseUrl(databaseUrl),
@@ -91,6 +115,9 @@ export function getConfig(): WorkerConfig {
     certEncryptionKey,
     certStoragePath,
     signedXmlStoragePath,
+    enableSriTestSubmission,
+    sriTestReceptionUrl,
+    sriTestAuthorizationUrl,
   };
 
   return _config;
@@ -108,5 +135,8 @@ export function validateConfig(): void {
   console.log(`  SRI_CERT_ENCRYPTION_KEY    : ${config.certEncryptionKey ? "[configurada]" : "[vacía]"}`);
   console.log(`  SRI_CERT_STORAGE_PATH      : ${config.certStoragePath ?? "[vacía]"}`);
   console.log(`  SRI_SIGNED_XML_STORAGE_PATH: ${config.signedXmlStoragePath ?? "[vacía]"}`);
+  console.log(`  ENABLE_SRI_TEST_SUBMISSION : ${config.enableSriTestSubmission}`);
+  console.log(`  SRI_TEST_RECEPCION_URL     : ${config.sriTestReceptionUrl ?? "[vacía]"}`);
+  console.log(`  SRI_TEST_AUTORIZACION_URL  : ${config.sriTestAuthorizationUrl ?? "[vacía]"}`);
   console.log("===================================");
 }

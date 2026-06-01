@@ -9,6 +9,8 @@
     "dev": "ts-node src/index.ts",
     "scan": "ts-node src/index.ts scan",
     "run:once": "ts-node src/index.ts run:once",
+    "scan:submission": "ts-node src/index.ts scan:submission",
+    "submit:once": "ts-node src/index.ts submit:once",
     "check-env": "ts-node src/index.ts check-env"
   },
   "dependencies": {
