@@ -36,6 +36,7 @@ export type WorkerConfig = {
   dryRunMarkSuccess: boolean;
   certEncryptionKey: string | null;
   certStoragePath: string | null;
+  signedXmlStoragePath: string | null;
 };
 
 let _config: WorkerConfig | null = null;
@@ -53,12 +54,30 @@ export function getConfig(): WorkerConfig {
 
   const certEncryptionKey = process.env["SRI_CERT_ENCRYPTION_KEY"]?.trim() || null;
   const certStoragePath = process.env["SRI_CERT_STORAGE_PATH"]?.trim() || null;
+  const signedXmlStoragePath =
+    process.env["SRI_SIGNED_XML_STORAGE_PATH"]?.trim() ||
+    (certStoragePath ? certStoragePath + "/signed-xml" : null);
 
+  // When real signing is enabled, validate that required secrets are present
   if (enableRealSriSigning) {
-    throw new Error(
-      "ENABLE_REAL_SRI_SIGNING=true pero la firma XAdES-BES real no está implementada todavía. " +
-        "Deja ENABLE_REAL_SRI_SIGNING=false hasta que el módulo de firma esté completo."
-    );
+    if (!certEncryptionKey) {
+      throw new Error(
+        "ENABLE_REAL_SRI_SIGNING=true requiere SRI_CERT_ENCRYPTION_KEY configurada. " +
+          "Sin esta clave no es posible descifrar los certificados."
+      );
+    }
+    if (!certStoragePath) {
+      throw new Error(
+        "ENABLE_REAL_SRI_SIGNING=true requiere SRI_CERT_STORAGE_PATH configurada. " +
+          "Sin esta ruta no es posible leer los certificados cifrados."
+      );
+    }
+    if (!signedXmlStoragePath) {
+      throw new Error(
+        "ENABLE_REAL_SRI_SIGNING=true requiere SRI_SIGNED_XML_STORAGE_PATH (o SRI_CERT_STORAGE_PATH) configurada. " +
+          "Sin esta ruta no es posible guardar los XML firmados."
+      );
+    }
   }
 
   _config = {
@@ -71,6 +90,7 @@ export function getConfig(): WorkerConfig {
     dryRunMarkSuccess,
     certEncryptionKey,
     certStoragePath,
+    signedXmlStoragePath,
   };
 
   return _config;
@@ -87,5 +107,6 @@ export function validateConfig(): void {
   console.log(`  DRY_RUN_MARK_SUCCESS       : ${config.dryRunMarkSuccess}`);
   console.log(`  SRI_CERT_ENCRYPTION_KEY    : ${config.certEncryptionKey ? "[configurada]" : "[vacía]"}`);
   console.log(`  SRI_CERT_STORAGE_PATH      : ${config.certStoragePath ?? "[vacía]"}`);
+  console.log(`  SRI_SIGNED_XML_STORAGE_PATH: ${config.signedXmlStoragePath ?? "[vacía]"}`);
   console.log("===================================");
 }

@@ -3,6 +3,7 @@ import {
   claimNextSigningJob,
   markJobFailed,
   markJobSucceededDryRun,
+  markJobSucceededReal,
   SigningJob,
 } from "./jobs";
 import {
@@ -18,6 +19,15 @@ import {
 import { getConfig } from "./config";
 import { logger } from "./logger";
 import crypto from "crypto";
+import { decryptBuffer, decryptText } from "./encryption";
+import { readEncryptedCertificate } from "./certificate-storage";
+import {
+  loadPkcs12Certificate,
+  signXmlWithTenantCertificate,
+  validateCertificateFingerprint,
+  validateSignedXmlBasic,
+} from "./xades-signature";
+import { saveSignedXml } from "./signed-xml-storage";
 
 // ── Tipos de filas DB ─────────────────────────────────────────────────────────
 
@@ -76,6 +86,10 @@ type SignatureConfigRow = {
   tenantId: string;
   status: string;
   certificateFileName: string | null;
+  encryptedCertificateStorageKey: string | null;
+  encryptedCertificatePassword: string | null;
+  fingerprintSha256: string | null;
+  encryptionKeyVersion: string | null;
 };
 
 // ── Carga de datos completa ───────────────────────────────────────────────────
@@ -116,7 +130,9 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
       [job.tenantId]
     ),
     query<SignatureConfigRow>(
-      `SELECT "tenantId", status, "certificateFileName"
+      `SELECT "tenantId", status, "certificateFileName",
+              "encryptedCertificateStorageKey", "encryptedCertificatePassword",
+              "fingerprintSha256", "encryptionKeyVersion"
        FROM "SriSignatureConfig"
        WHERE "tenantId" = $1`,
       [job.tenantId]
@@ -205,7 +221,11 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
 
 export type ProcessResult =
   | { outcome: "no_job" }
-  | { outcome: "claimed"; jobId: string; result: "dry_run_failed" | "dry_run_succeeded" | "error" }
+  | {
+      outcome: "claimed";
+      jobId: string;
+      result: "dry_run_failed" | "dry_run_succeeded" | "real_sign_failed" | "real_sign_succeeded" | "error";
+    }
   | { outcome: "error"; message: string };
 
 export async function processNextSigningJob(): Promise<ProcessResult> {
@@ -304,21 +324,18 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
         return { outcome: "claimed", jobId: job.id, result: "dry_run_failed" };
       }
 
-      // Dry-run enabled
       logger.info("Modo dry-run activo. Llegamos hasta el punto de firma.", {
         jobId: job.id,
         dryRunMarkSuccess: config.dryRunMarkSuccess,
       });
 
       if (config.dryRunMarkSuccess) {
-        // Mark SUCCEEDED with dry-run metadata — does NOT touch SriDocument.status
         await markJobSucceededDryRun(job.id, xmlContent);
         logger.info("Job marcado SUCCEEDED (dry-run). SriDocument.status NO cambiado a SIGNED.", {
           jobId: job.id,
         });
         return { outcome: "claimed", jobId: job.id, result: "dry_run_succeeded" };
       } else {
-        // Mark controlled fail — this is the safe default
         await markJobFailed(
           job.id,
           "REAL_SIGNING_DISABLED",
@@ -333,8 +350,195 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
       }
     }
 
-    // ENABLE_REAL_SRI_SIGNING=true — not implemented yet (guarded at startup by config.ts)
-    throw new Error("REAL_SIGNING_NOT_IMPLEMENTED — este bloque no debería ser alcanzable.");
+    // ── Firma XAdES-BES real ───────────────────────────────────────────────────
+    // ENABLE_REAL_SRI_SIGNING=true
+    // Requires: SRI_CERT_ENCRYPTION_KEY, SRI_CERT_STORAGE_PATH, valid signature config
+
+    logger.info("ENABLE_REAL_SRI_SIGNING=true — iniciando firma XAdES-BES real.", {
+      jobId: job.id,
+      tenantId: job.tenantId,
+    });
+
+    const sigConfig = bundle.signatureConfig;
+    if (
+      !sigConfig ||
+      !sigConfig.encryptedCertificateStorageKey ||
+      !sigConfig.encryptedCertificatePassword
+    ) {
+      await markJobFailed(
+        job.id,
+        "NO_SIGNATURE_CONFIG",
+        "Configuración de firma incompleta: faltan encryptedCertificateStorageKey o " +
+          "encryptedCertificatePassword. Ve a SRI → Firma electrónica."
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Validate encryption key is available
+    const encKey = config.certEncryptionKey!;
+    const certStoragePath = config.certStoragePath!;
+    const signedXmlStoragePath = config.signedXmlStoragePath!;
+
+    // Decrypt certificate password (never log it)
+    let certPassword: string;
+    try {
+      certPassword = decryptText(sigConfig.encryptedCertificatePassword, encKey);
+    } catch (err) {
+      await markJobFailed(
+        job.id,
+        "CERT_PASSWORD_DECRYPT_ERROR",
+        `No se pudo descifrar la contraseña del certificado: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Read and decrypt certificate file
+    let p12Buffer: Buffer;
+    try {
+      const encryptedCertBuffer = readEncryptedCertificate(
+        certStoragePath,
+        sigConfig.encryptedCertificateStorageKey
+      );
+      p12Buffer = decryptBuffer(
+        encryptedCertBuffer.toString("utf8"),
+        encKey
+      );
+    } catch (err) {
+      certPassword = ""; // clear before logging anything
+      await markJobFailed(
+        job.id,
+        "CERT_READ_ERROR",
+        `No se pudo leer o descifrar el certificado: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Load PKCS#12 and validate
+    let certBundle;
+    try {
+      certBundle = loadPkcs12Certificate(p12Buffer, certPassword);
+    } catch (err) {
+      certPassword = ""; // clear
+      const msg = err instanceof Error ? err.message : String(err);
+      const errorCode = msg.startsWith("CERTIFICATE_PASSWORD_INVALID")
+        ? "CERTIFICATE_PASSWORD_INVALID"
+        : "CERTIFICATE_LOAD_ERROR";
+      await markJobFailed(job.id, errorCode, msg);
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+    certPassword = ""; // clear as soon as certificate is loaded
+
+    // Check certificate expiry
+    const now = new Date();
+    if (now > certBundle.notAfter) {
+      await markJobFailed(
+        job.id,
+        "CERTIFICATE_EXPIRED",
+        `El certificado de firma expiró el ${certBundle.notAfter.toISOString()}. ` +
+          `Renueva el certificado en SRI → Firma electrónica.`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Validate fingerprint if available
+    if (sigConfig.fingerprintSha256) {
+      try {
+        validateCertificateFingerprint(certBundle, sigConfig.fingerprintSha256);
+      } catch (err) {
+        await markJobFailed(
+          job.id,
+          "CERTIFICATE_FINGERPRINT_MISMATCH",
+          err instanceof Error ? err.message : String(err)
+        );
+        return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+      }
+    }
+
+    // Validate RUC match (best-effort — warn only)
+    const subjectRuc = certBundle.subjectName.match(/SERIALNUMBER=(\d{13})/)?.[1];
+    if (subjectRuc && subjectRuc !== bundle.profile.ruc) {
+      logger.warn(
+        "El RUC en el certificado no coincide con el RUC del perfil tributario. " +
+          "Verifica que el certificado pertenece a este tenant.",
+        {
+          jobId: job.id,
+          tenantId: job.tenantId,
+          certRucPartial: subjectRuc.slice(0, 4) + "...",
+          profileRucPartial: bundle.profile.ruc.slice(0, 4) + "...",
+        }
+      );
+    }
+
+    logger.info("Certificado cargado y validado. Iniciando firma XAdES-BES.", {
+      jobId: job.id,
+      certSubject: certBundle.subjectName,
+      certNotAfter: certBundle.notAfter.toISOString(),
+      certFingerprintPartial: certBundle.certSha256FingerprintHex.slice(0, 12) + "...",
+    });
+
+    // Sign the XML
+    let signingResult;
+    try {
+      signingResult = signXmlWithTenantCertificate(xmlContent, certBundle);
+    } catch (err) {
+      await markJobFailed(
+        job.id,
+        "XADES_SIGNING_FAILED",
+        `Error en la firma XAdES-BES: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Log warnings if any (never log the XML content itself)
+    for (const w of signingResult.warnings) {
+      logger.warn("Advertencia en firma XAdES-BES", { jobId: job.id, warning: w });
+    }
+
+    // Basic structural validation
+    const validation = validateSignedXmlBasic(signingResult.signedXml);
+    if (!validation.valid) {
+      await markJobFailed(
+        job.id,
+        "SIGNED_XML_INVALID",
+        `El XML firmado no pasó la validación básica de estructura: ${validation.errors.join("; ")}`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Save signed XML to storage
+    let savedXml;
+    try {
+      savedXml = saveSignedXml(
+        signedXmlStoragePath,
+        job.tenantId,
+        job.documentId,
+        signingResult.signedXml
+      );
+    } catch (err) {
+      await markJobFailed(
+        job.id,
+        "SIGNED_XML_STORAGE_ERROR",
+        `No se pudo guardar el XML firmado: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
+
+    // Mark job SUCCEEDED and SriDocument.status = SIGNED
+    await markJobSucceededReal(job.id, {
+      signedXmlStorageKey: savedXml.storageKey,
+      signedXmlHash: signingResult.signedXmlHash,
+      unsignedXmlHash,
+    });
+
+    logger.info("Job completado. XML firmado guardado. SriDocument.status actualizado a SIGNED.", {
+      jobId: job.id,
+      documentId: job.documentId,
+      storageKey: savedXml.storageKey,
+      signedXmlHashPartial: signingResult.signedXmlHash.slice(0, 12) + "...",
+      byteLength: savedXml.byteLength,
+    });
+
+    return { outcome: "claimed", jobId: job.id, result: "real_sign_succeeded" };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Error al procesar job", { jobId: job.id, message });

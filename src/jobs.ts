@@ -243,3 +243,70 @@ export async function markJobSucceededDryRun(
 
   return mapJob(updatedRows[0]!);
 }
+
+export async function markJobSucceededReal(
+  jobId: string,
+  params: {
+    signedXmlStorageKey: string;
+    signedXmlHash: string;
+    unsignedXmlHash: string;
+  }
+): Promise<SigningJob> {
+  const { signedXmlStorageKey, signedXmlHash, unsignedXmlHash } = params;
+  const now = new Date().toISOString();
+
+  // Load job to get documentId and tenantId for the SriDocument update
+  const jobRows = await query<RawJobRow>(
+    `SELECT * FROM "SriSigningJob" WHERE id = $1`,
+    [jobId]
+  );
+
+  if (jobRows.length === 0) {
+    throw new Error(`Job no encontrado: ${jobId}`);
+  }
+
+  const job = jobRows[0]!;
+
+  // Atomic transaction: mark job SUCCEEDED + update SriDocument.status = SIGNED
+  return withTransaction(async (client: PoolClient) => {
+    const updatedJobRows = await client.query<RawJobRow>(
+      `UPDATE "SriSigningJob"
+       SET
+         status = 'SUCCEEDED',
+         "finishedAt" = $1,
+         "lockedAt" = NULL,
+         "lockedBy" = NULL,
+         "signedXmlHash" = $2,
+         "signedXmlStorageKey" = $3,
+         "unsignedXmlHash" = $4,
+         "updatedAt" = $1
+       WHERE id = $5 AND status = 'RUNNING'
+       RETURNING *`,
+      [now, signedXmlHash, signedXmlStorageKey, unsignedXmlHash, jobId]
+    );
+
+    if (updatedJobRows.rows.length === 0) {
+      throw new Error(
+        `No se pudo marcar job SUCCEEDED — puede que ya no esté en RUNNING: ${jobId}`
+      );
+    }
+
+    // Update SriDocument.status to SIGNED only after job is confirmed SUCCEEDED
+    await client.query(
+      `UPDATE "SriDocument"
+       SET status = 'SIGNED', "updatedAt" = $1
+       WHERE id = $2 AND "tenantId" = $3`,
+      [now, job.documentId, job.tenantId]
+    );
+
+    logger.info("Job SUCCEEDED y SriDocument.status actualizado a SIGNED.", {
+      jobId,
+      documentId: job.documentId,
+      tenantId: job.tenantId,
+      signedXmlStorageKey,
+      signedXmlHashPartial: signedXmlHash.slice(0, 12) + "...",
+    });
+
+    return mapJob(updatedJobRows.rows[0]!);
+  });
+}

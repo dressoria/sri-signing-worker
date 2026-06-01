@@ -6,24 +6,36 @@ Worker de firma electrónica SRI para Appsolux. Procesa `SriSigningJob` de la ba
 
 - Se conecta a la Core DB de Appsolux (`postgresql://`).
 - Lista jobs `SriSigningJob` con status `QUEUED`.
-- Reclama un job de forma segura (transacción para evitar race conditions).
-- Carga los datos completos del documento y del tenant.
+- Reclama un job de forma segura (`FOR UPDATE SKIP LOCKED`).
+- Carga los datos completos del documento, tenant y configuración de firma.
+- Valida cross-tenant antes de procesar cualquier dato.
 - Genera el XML preliminar del comprobante.
-- Procesa en modo **dry-run** (sin firma real todavía).
-- Marca el job como `FAILED` (controlado) o `SUCCEEDED` (solo si dry-run lo permite).
+- **Si `ENABLE_REAL_SRI_SIGNING=true`**: firma con XAdES-BES real usando el certificado cifrado del tenant.
 - Implementa reintentos con backoff automático.
 
-## Qué NO hace todavía
+## Qué hace en firma real (ENABLE_REAL_SRI_SIGNING=true)
 
-- **NO firma** con XAdES-BES.
-- **NO carga** certificados `.p12`.
-- **NO descifra** certificados.
-- **NO se conecta** al web service del SRI.
-- **NO autoriza** comprobantes.
-- **NO genera** RIDE.
-- **NO envía** correos.
-- **NO marca** `SriDocument.status = SIGNED`.
-- **NO ejecuta** en loop infinito.
+1. Lee el certificado cifrado desde `SRI_CERT_STORAGE_PATH`.
+2. Descifra el certificado con `SRI_CERT_ENCRYPTION_KEY` (AES-256-GCM).
+3. Descifra la contraseña del certificado (misma clave).
+4. Carga el PKCS#12 (`.p12`/`.pfx`) con node-forge.
+5. Valida expiración del certificado.
+6. Valida fingerprint SHA-256 si está configurado.
+7. Advierte si el RUC del certificado no coincide con el perfil tributario.
+8. Genera XML preliminar con número de comprobante y clave de acceso.
+9. Firma con XAdES-BES (RSA-SHA256, C14N inclusivo, QualifyingProperties).
+10. Valida estructura básica del XML firmado.
+11. Guarda el XML firmado en `SRI_SIGNED_XML_STORAGE_PATH/<tenantId>/<documentId>/signed.xml`.
+12. Marca el job `SUCCEEDED` y actualiza `SriDocument.status = SIGNED` en una transacción.
+
+## Qué NO hace
+
+- **NO** envía al web service del SRI (no autoriza comprobantes).
+- **NO** genera RIDE oficial.
+- **NO** envía correos.
+- **NO** ejecuta en loop infinito (se usa con cron o manualmente).
+- **NO** imprime contraseñas, certificados ni claves en logs.
+- **NO** firma documentos de un tenant con certificado de otro tenant.
 
 ## Requisitos
 
@@ -37,31 +49,35 @@ cp .env.example .env
 # Editar .env con los valores reales
 ```
 
-Variables clave:
-
-| Variable | Descripción | Default seguro |
+| Variable | Descripción | Default |
 |---|---|---|
-| `DATABASE_URL_WORKER` | PostgreSQL de Appsolux Core | (obligatorio) |
-| `WORKER_ID` | Nombre único de esta instancia | `sri-signing-worker-local` |
+| `DATABASE_URL_WORKER` | PostgreSQL Appsolux Core | (requerida) |
+| `WORKER_ID` | Nombre único de esta instancia | (requerida) |
 | `DB_SSL` | SSL para la conexión | `false` |
-| `ENABLE_REAL_SRI_SIGNING` | Habilita firma real (XAdES-BES) | `false` |
+| `ENABLE_REAL_SRI_SIGNING` | Habilita firma XAdES-BES real | `false` |
 | `ENABLE_SRI_SIGNING_DRY_RUN` | Habilita modo dry-run | `true` |
-| `DRY_RUN_MARK_SUCCESS` | En dry-run, marca jobs SUCCEEDED | `false` |
-| `SRI_CERT_ENCRYPTION_KEY` | Clave de cifrado del certificado | (vacío — no usada aún) |
-| `SRI_CERT_STORAGE_PATH` | Ruta al certificado cifrado | (vacío — no usada aún) |
+| `DRY_RUN_MARK_SUCCESS` | En dry-run, marcar jobs SUCCEEDED | `false` |
+| `SRI_CERT_ENCRYPTION_KEY` | Clave AES-256 (64 hex chars) para descifrar certs | (vacío) |
+| `SRI_CERT_STORAGE_PATH` | Ruta donde están los certificados cifrados | (vacío) |
+| `SRI_SIGNED_XML_STORAGE_PATH` | Ruta donde guardar XML firmados | (vacío; default: `<CERT_PATH>/signed-xml`) |
+
+Generar `SRI_CERT_ENCRYPTION_KEY`:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
 ## Comandos
 
 ```bash
 npm install
 
-# Verificar que todas las variables de entorno estén presentes
+# Verificar variables de entorno
 npm run check-env
 
-# Listar jobs QUEUED (solo lectura, sin modificar DB)
+# Listar jobs QUEUED (solo lectura)
 npm run scan
 
-# Reclamar y procesar máximo 1 job, luego terminar
+# Reclamar y procesar 1 job, luego terminar
 npm run run:once
 
 # Type-check
@@ -71,51 +87,81 @@ npm run typecheck
 npm run build
 ```
 
-## Modos de operación
+## Tabla de comportamiento por flags
 
-### scan
-Solo lectura. Prueba la conexión, lista jobs pendientes, muestra resumen. No modifica nada.
+| `ENABLE_REAL_SRI_SIGNING` | `ENABLE_SRI_SIGNING_DRY_RUN` | `DRY_RUN_MARK_SUCCESS` | Resultado |
+|---|---|---|---|
+| `false` | `false` | — | Job → FAILED `REAL_SIGNING_DISABLED` |
+| `false` | `true` | `false` | Job → FAILED `REAL_SIGNING_DISABLED` (safe default) |
+| `false` | `true` | `true` | Job → SUCCEEDED `dry-run:sha256...` · SriDocument NO cambia |
+| `true` | — | — | Firma XAdES-BES real → SUCCEEDED + SriDocument = SIGNED |
 
-### run:once
-Reclama un job (si existe), lo procesa en dry-run, y termina. Ideal para testing manual y cron.
-
-## Flags de control
+## Flujo de firma real
 
 ```
-ENABLE_REAL_SRI_SIGNING=false   → worker nunca firma real
-ENABLE_SRI_SIGNING_DRY_RUN=true → worker procesa hasta el punto de firma, registra resultado
-DRY_RUN_MARK_SUCCESS=false      → job queda FAILED controlado (REAL_SIGNING_DISABLED)
-DRY_RUN_MARK_SUCCESS=true       → job queda SUCCEEDED con metadata dry-run (solo para test del flujo completo)
+DB SriSigningJob { status: QUEUED }
+  │
+  ▼ claimNextSigningJob (FOR UPDATE SKIP LOCKED)
+  │
+  ▼ loadDocumentBundle
+    ├── SriDocument (READY_FOR_TESTING)
+    ├── SriTaxpayerProfile
+    ├── SriEstablishment + SriIssuePoint
+    └── SriSignatureConfig
+        ├── encryptedCertificateStorageKey → readEncryptedCertificate()
+        └── encryptedCertificatePassword → decryptText()
+  │
+  ▼ loadPkcs12Certificate (node-forge)
+    ├── Valida expiración
+    ├── Valida fingerprint SHA-256 (opcional)
+    └── Advierte si RUC no coincide
+  │
+  ▼ buildPreliminaryXml (acceso key + XML SRI)
+  │
+  ▼ signXmlWithTenantCertificate (XAdES-BES)
+    ├── C14N del documento (xml-crypto)
+    ├── QualifyingProperties (SigningTime + CertDigest)
+    ├── C14N de SignedProperties en contexto
+    ├── SignedInfo con ambas referencias
+    ├── RSA-SHA256 del C14N de SignedInfo (Node.js crypto)
+    └── XML final con <Signature> incrustado
+  │
+  ▼ validateSignedXmlBasic
+  │
+  ▼ saveSignedXml → signed-xml/<tenantId>/<documentId>/signed.xml
+  │
+  ▼ markJobSucceededReal (transacción)
+    ├── SriSigningJob.status = SUCCEEDED
+    └── SriDocument.status = SIGNED
 ```
-
-**Nunca activar `ENABLE_REAL_SRI_SIGNING=true` sin implementar XAdES-BES real.**
 
 ## Seguridad
 
-- La `DATABASE_URL_WORKER` nunca se imprime en logs.
+- `DATABASE_URL_WORKER` se sanitiza antes de loguear (password oculto).
 - `SRI_CERT_ENCRYPTION_KEY` nunca se imprime.
-- Certificados nunca se loguean.
-- `SriDocument.status` nunca se cambia a `SIGNED` desde este worker en esta fase.
-- El worker valida que `document.tenantId == job.tenantId` antes de procesar.
-- No existe firma cross-tenant.
+- Contraseña del certificado se borra de memoria inmediatamente tras cargar el P12.
+- El XML firmado nunca se imprime en logs.
+- El worker valida `document.tenantId == job.tenantId` antes de procesar.
+- Los paths de archivos se validan contra path traversal antes de abrir.
+- Certificados solo se leen de rutas dentro de `SRI_CERT_STORAGE_PATH`.
+- XML firmados solo se escriben en rutas dentro de `SRI_SIGNED_XML_STORAGE_PATH`.
 
-## Arquitectura
+## Cómo probar con certificado real
 
-```
-Next.js Dashboard
-      │
-      │ POST /api/sri/documents/[id]/signing-jobs
-      ▼
-SriSigningJob { status: QUEUED }
-      │
-      │ npm run run:once
-      ▼
-sri-signing-worker
-  ├── Reclama job (transacción)
-  ├── Carga documento + tenant + signature config
-  ├── Genera XML preliminar
-  ├── [dry-run] Registra resultado
-  └── Marca job FAILED/SUCCEEDED
-```
+1. Configura `.env` con `DATABASE_URL_WORKER` apuntando a la DB.
+2. Asegúrate de que hay un `SriSigningJob` en estado `QUEUED` y el documento en `READY_FOR_TESTING`.
+3. Asegúrate de que la `SriSignatureConfig` del tenant tiene el certificado cargado y cifrado.
+4. Configura `SRI_CERT_ENCRYPTION_KEY` con la misma clave que usa el dashboard.
+5. Configura `SRI_CERT_STORAGE_PATH` con la ruta de los certificados.
+6. Configura `ENABLE_REAL_SRI_SIGNING=true`.
+7. Ejecuta `npm run run:once`.
+8. Verifica el XML firmado en `SRI_SIGNED_XML_STORAGE_PATH`.
+
+## Limitaciones actuales
+
+- XAdES-BES implementado pero no verificado contra el web service del SRI todavía.
+- No envía al SRI (próxima fase).
+- No genera RIDE (próxima fase).
+- El loop de polling continuo no está implementado (ejecutar con cron o manualmente).
 
 Para más detalles sobre la arquitectura completa, ver `docs/SRI_SIGNING_WORKER.md` en el repositorio del dashboard.
