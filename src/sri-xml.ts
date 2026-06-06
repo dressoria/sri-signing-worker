@@ -159,6 +159,10 @@ export function buildPreliminaryXml(params: {
 }): string {
   const { doc, profile, establishment, issuePoint, lines, accessKey, displayNumber } = params;
 
+  if (doc.sequentialNumber == null) {
+    throw new Error("MISSING_PERSISTED_SEQUENCE: El documento no tiene sequentialNumber persistido.");
+  }
+
   const issuedAt = doc.issuedAt ?? doc.createdAt;
   const fechaEmision = `${String(issuedAt.getDate()).padStart(2, "0")}/${String(issuedAt.getMonth() + 1).padStart(2, "0")}/${issuedAt.getFullYear()}`;
 
@@ -216,7 +220,7 @@ export function buildPreliminaryXml(params: {
     <codDoc>${getSriDocumentCode(doc.documentType)}</codDoc>
     <estab>${esc(establishment.code)}</estab>
     <ptoEmi>${esc(issuePoint.code)}</ptoEmi>
-    <secuencial>${formatSequential(doc.sequentialNumber ?? 1)}</secuencial>
+    <secuencial>${formatSequential(doc.sequentialNumber)}</secuencial>
     <dirMatriz>${esc(establishment.address)}</dirMatriz>
   </infoTributaria>
   <infoFactura>

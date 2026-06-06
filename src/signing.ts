@@ -7,7 +7,6 @@ import {
   SigningJob,
 } from "./jobs";
 import {
-  buildAccessKey,
   buildDisplayNumber,
   buildPreliminaryXml,
   SriDocumentData,
@@ -262,21 +261,23 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
     }
 
     // Build XML
-    const issuedAt = bundle.doc.issuedAt ?? bundle.doc.createdAt;
-    const seqNum = bundle.doc.sequentialNumber ?? 1;
-
-    const accessKey =
-      bundle.doc.accessKey ??
-      buildAccessKey({
-        issuedAt,
-        documentType: bundle.doc.documentType,
-        ruc: bundle.profile.ruc,
-        environment: bundle.doc.environment,
-        establishmentCode: bundle.establishment.code,
-        issuePointCode: bundle.issuePoint.code,
-        sequentialNumber: seqNum,
-        documentId: bundle.doc.id,
+    if (bundle.doc.sequentialNumber == null || !bundle.doc.accessKey) {
+      await markJobFailed(
+        job.id,
+        "MISSING_PERSISTED_NUMBERING",
+        "El comprobante no tiene sequentialNumber/accessKey persistidos. Reserva y guarda la numeracion en el dashboard antes de firmar."
+      );
+      logger.warn("Job fallado: numeracion persistida faltante", {
+        jobId: job.id,
+        documentId: job.documentId,
+        sequentialNumber: bundle.doc.sequentialNumber,
+        hasAccessKey: Boolean(bundle.doc.accessKey),
       });
+      return { outcome: "claimed", jobId: job.id, result: "dry_run_failed" };
+    }
+
+    const seqNum = bundle.doc.sequentialNumber;
+    const accessKey = bundle.doc.accessKey;
 
     const displayNumber = buildDisplayNumber(
       bundle.establishment.code,

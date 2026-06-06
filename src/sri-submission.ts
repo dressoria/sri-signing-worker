@@ -117,12 +117,32 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
     const signedXml = readSignedXml(config.signedXmlStoragePath!, doc.latestSignedXmlStorageKey!);
     ensureSignedXmlLooksSigned(signedXml);
 
-    const accessKey = extractAccessKeyFromXml(signedXml) ?? doc.accessKey;
-    if (!accessKey) {
+    if (!doc.accessKey) {
       await markSubmissionFailed({
         jobId: job.id,
         errorCode: "ACCESS_KEY_NOT_FOUND",
-        errorMessage: "No se pudo determinar la clave de acceso del XML firmado.",
+        errorMessage: "El SriDocument no tiene accessKey persistida. No se puede enviar este comprobante.",
+      });
+      return { outcome: "claimed", jobId: job.id, result: "failed" };
+    }
+
+    const accessKey = doc.accessKey;
+    const xmlAccessKey = extractAccessKeyFromXml(signedXml);
+    if (!xmlAccessKey) {
+      await markSubmissionFailed({
+        jobId: job.id,
+        errorCode: "SIGNED_XML_ACCESS_KEY_NOT_FOUND",
+        errorMessage: "El XML firmado guardado no contiene clave de acceso.",
+      });
+      return { outcome: "claimed", jobId: job.id, result: "failed" };
+    }
+
+    if (xmlAccessKey !== accessKey) {
+      await markSubmissionFailed({
+        jobId: job.id,
+        errorCode: "ACCESS_KEY_MISMATCH",
+        errorMessage:
+          "La clave del XML firmado no coincide con la clave persistida del comprobante. Se aborta el envio para evitar divergencia.",
       });
       return { outcome: "claimed", jobId: job.id, result: "failed" };
     }

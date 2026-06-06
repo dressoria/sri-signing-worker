@@ -15,6 +15,9 @@ type AuthorizationMessage = {
 const SOAP_ENV_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/";
 const SRI_RECEPCION_NAMESPACE = "http://ec.gob.sri.ws.recepcion";
 const SRI_AUTORIZACION_NAMESPACE = "http://ec.gob.sri.ws.autorizacion";
+const SRI_MESSAGE_BY_IDENTIFIER: Record<string, string> = {
+  "35": "Clave de acceso registrada",
+};
 
 export type SRIReceptionResult =
   | {
@@ -87,12 +90,23 @@ function extractAllBlocks(xml: string, tagName: string): string[] {
 }
 
 function parseMessages(blocks: string[]): ReceiptMessage[] {
-  return blocks.map((block) => ({
-    identificador: extractFirstTag(block, "identificador") ?? undefined,
-    mensaje: extractFirstTag(block, "mensaje") ?? "Mensaje no disponible",
-    informacionAdicional: extractFirstTag(block, "informacionAdicional") ?? undefined,
-    tipo: extractFirstTag(block, "tipo") ?? undefined,
-  }));
+  return blocks.map((block) => {
+    const identificador = extractFirstTag(block, "identificador") ?? undefined;
+    const rawMessage = extractFirstTag(block, "mensaje");
+    const mappedMessage =
+      identificador != null ? SRI_MESSAGE_BY_IDENTIFIER[identificador] : undefined;
+    const mensaje =
+      rawMessage && rawMessage !== "Mensaje no disponible"
+        ? rawMessage
+        : mappedMessage ?? "Mensaje no disponible";
+
+    return {
+      identificador,
+      mensaje,
+      informacionAdicional: extractFirstTag(block, "informacionAdicional") ?? undefined,
+      tipo: extractFirstTag(block, "tipo") ?? undefined,
+    };
+  });
 }
 
 function sanitizeSoapFaultText(xml: string): string {
