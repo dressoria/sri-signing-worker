@@ -12,6 +12,12 @@ import {
 } from "./sri-submission-jobs";
 import { querySRIAuthorization, sendSignedXmlToSRIReception } from "./sri-webservice";
 
+type SRIStatusMessage = {
+  mensaje: string;
+  informacionAdicional?: string;
+  identificador?: string;
+};
+
 type SignedDocumentRow = {
   id: string;
   tenantId: string;
@@ -72,7 +78,7 @@ async function loadSignedDocument(job: SubmissionJob): Promise<SignedDocumentRow
 }
 
 function summarizeMessages(
-  messages: Array<{ mensaje: string; informacionAdicional?: string; identificador?: string }>
+  messages: SRIStatusMessage[]
 ): string {
   return messages
     .map((message) =>
@@ -81,6 +87,26 @@ function summarizeMessages(
         .join(" - ")
     )
     .join("; ");
+}
+
+function normalizeSriText(value: string | undefined): string {
+  return value?.toLocaleLowerCase().trim() ?? "";
+}
+
+export function hasRegisteredAccessKeyMessage(messages: SRIStatusMessage[]): boolean {
+  return messages.some((message) => {
+    if (message.identificador === "35") {
+      return true;
+    }
+
+    const mensaje = normalizeSriText(message.mensaje);
+    const informacionAdicional = normalizeSriText(message.informacionAdicional);
+
+    return (
+      mensaje.includes("clave de acceso registrada") ||
+      informacionAdicional.includes("clave de acceso registrada")
+    );
+  });
 }
 
 export type SubmissionProcessResult =
@@ -154,22 +180,30 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
       });
 
       if (reception.kind === "DEVUELTA") {
-        await markSubmissionRejected({
+        if (hasRegisteredAccessKeyMessage(reception.messages)) {
+          logger.info("Recepcion SRI devolvio #35 Clave de acceso registrada. Se consultara autorizacion.", {
+            jobId: job.id,
+            accessKey,
+            messages: reception.messages,
+          });
+        } else {
+          await markSubmissionRejected({
+            jobId: job.id,
+            sriReceiptStatus: reception.status,
+            sriAccessKey: accessKey,
+            errorMessage: summarizeMessages(reception.messages),
+            sriResponseRaw: { phase: "recepcion", status: reception.status, messages: reception.messages },
+          });
+          return { outcome: "claimed", jobId: job.id, result: "rejected" };
+        }
+      } else {
+        await markSubmissionReceived({
           jobId: job.id,
           sriReceiptStatus: reception.status,
           sriAccessKey: accessKey,
-          errorMessage: summarizeMessages(reception.messages),
-          sriResponseRaw: { phase: "recepcion", status: reception.status, messages: reception.messages },
+          sriResponseRaw: { phase: "recepcion", status: reception.status },
         });
-        return { outcome: "claimed", jobId: job.id, result: "rejected" };
       }
-
-      await markSubmissionReceived({
-        jobId: job.id,
-        sriReceiptStatus: reception.status,
-        sriAccessKey: accessKey,
-        sriResponseRaw: { phase: "recepcion", status: reception.status },
-      });
     }
 
     const authorization = await querySRIAuthorization({
