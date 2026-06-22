@@ -27,6 +27,7 @@ import {
   validateSignedXmlBasic,
 } from "./xades-signature";
 import { saveSignedXml } from "./signed-xml-storage";
+import { createSubmissionJobAfterSigning } from "./sri-submission-jobs";
 
 // ── Tipos de filas DB ─────────────────────────────────────────────────────────
 
@@ -68,7 +69,10 @@ type ProfileRow = {
   ruc: string;
   legalName: string;
   tradeName: string | null;
+  dirMatriz: string | null;
   environment: "TEST" | "PRODUCTION";
+  accountingRequired: boolean;
+  contribuyenteRimpe: string | null;
 };
 
 type EstablishmentRow = {
@@ -123,7 +127,8 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
       [job.documentId]
     ),
     query<ProfileRow>(
-      `SELECT ruc, "legalName", "tradeName", environment
+      `SELECT ruc, "legalName", "tradeName", "dirMatriz", environment,
+              "accountingRequired", "contribuyenteRimpe"
        FROM "SriTaxpayerProfile"
        WHERE "tenantId" = $1`,
       [job.tenantId]
@@ -154,8 +159,18 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
     );
   }
 
-  const profile = profileRows[0];
-  if (!profile) throw new Error(`Perfil tributario no encontrado para tenant ${job.tenantId}`);
+  const profileRow = profileRows[0];
+  if (!profileRow) throw new Error(`Perfil tributario no encontrado para tenant ${job.tenantId}`);
+
+  const profile: SriProfileData = {
+    ruc: profileRow.ruc,
+    legalName: profileRow.legalName,
+    tradeName: profileRow.tradeName,
+    dirMatriz: profileRow.dirMatriz,
+    environment: profileRow.environment,
+    accountingRequired: profileRow.accountingRequired ?? false,
+    contribuyenteRimpe: profileRow.contribuyenteRimpe,
+  };
 
   // Load establishment and issue point
   const [estabRows, issueRows] = await Promise.all([
@@ -538,6 +553,22 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
       signedXmlHashPartial: signingResult.signedXmlHash.slice(0, 12) + "...",
       byteLength: savedXml.byteLength,
     });
+
+    // Auto-crear submission job (best-effort — no bloquea si falla)
+    try {
+      await createSubmissionJobAfterSigning({
+        tenantId: job.tenantId,
+        documentId: job.documentId,
+        environment: bundle.doc.environment,
+        sriAccessKey: bundle.doc.accessKey,
+      });
+    } catch (submitErr) {
+      logger.warn("No se pudo crear submission job automaticamente. Se puede crear manualmente desde el dashboard.", {
+        jobId: job.id,
+        documentId: job.documentId,
+        error: submitErr instanceof Error ? submitErr.message : String(submitErr),
+      });
+    }
 
     return { outcome: "claimed", jobId: job.id, result: "real_sign_succeeded" };
   } catch (err) {

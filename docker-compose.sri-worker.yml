@@ -1,0 +1,18 @@
+services:
+  sri-worker:
+    image: node:20-bookworm
+    container_name: appsolux-sri-worker
+    restart: unless-stopped
+    working_dir: /work
+    command: bash -lc "npm install && while true; do npm run run:once; npm run submit:once; sleep 10; done"
+    env_file:
+      - .env
+    volumes:
+      - /home/ubuntu/appsolux-workers/sri-signing-worker:/work
+      - /home/ubuntu/appsolux-secure:/home/ubuntu/appsolux-secure
+    networks:
+      - appsolux-network
+
+networks:
+  appsolux-network:
+    external: true

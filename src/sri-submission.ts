@@ -2,6 +2,7 @@ import { query } from "./db";
 import { getConfig } from "./config";
 import { logger } from "./logger";
 import { readSignedXml } from "./signed-xml-storage";
+import { saveAuthorizedXml } from "./authorized-xml-storage";
 import {
   claimNextSubmissionJob,
   markSubmissionAuthorized,
@@ -66,10 +67,6 @@ async function loadSignedDocument(job: SubmissionJob): Promise<SignedDocumentRow
     throw new Error(`El documento no esta listo para envio SRI. Estado actual: ${doc.status}`);
   }
 
-  if (doc.environment !== "TEST") {
-    throw new Error("El envio a produccion SRI todavia no esta habilitado.");
-  }
-
   if (!doc.latestSignedXmlStorageKey) {
     throw new Error("SIGNED_XML_NOT_FOUND: No se encontro signedXmlStorageKey para este documento.");
   }
@@ -120,7 +117,7 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
   if (!config.enableSriTestSubmission) {
     return {
       outcome: "error",
-      message: "ENABLE_SRI_TEST_SUBMISSION=false. El worker no debe enviar XML al SRI TEST.",
+      message: "ENABLE_SRI_TEST_SUBMISSION=false. El worker no debe enviar XML al SRI.",
     };
   }
 
@@ -140,6 +137,34 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
 
   try {
     const doc = await loadSignedDocument(job);
+
+    // Guard de producción — requiere flag explícito en el worker
+    if (doc.environment === "PRODUCTION" && !config.enableSriProductionSubmission) {
+      await markSubmissionFailed({
+        jobId: job.id,
+        errorCode: "PRODUCTION_SUBMISSION_DISABLED",
+        errorMessage:
+          "SRI_PRODUCTION_SUBMISSION_ENABLED no está activo. " +
+          "Activa SRI_PRODUCTION_SUBMISSION_ENABLED=true en el worker para habilitar el envío a producción SRI.",
+      });
+      logger.warn("Submission job bloqueado: producción SRI no habilitada.", {
+        jobId: job.id,
+        tenantId: job.tenantId,
+        documentId: job.documentId,
+        environment: doc.environment,
+      });
+      return { outcome: "claimed", jobId: job.id, result: "failed" };
+    }
+
+    // Selección de URLs según ambiente del documento
+    const isProduction = doc.environment === "PRODUCTION";
+    const receptionUrl = isProduction
+      ? config.sriProductionReceptionUrl!
+      : config.sriTestReceptionUrl!;
+    const authorizationUrl = isProduction
+      ? config.sriProductionAuthorizationUrl!
+      : config.sriTestAuthorizationUrl!;
+
     const signedXml = readSignedXml(config.signedXmlStoragePath!, doc.latestSignedXmlStorageKey!);
     ensureSignedXmlLooksSigned(signedXml);
 
@@ -174,10 +199,7 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
     }
 
     if (job.receivedAt == null) {
-      const reception = await sendSignedXmlToSRIReception({
-        url: config.sriTestReceptionUrl!,
-        signedXml,
-      });
+      const reception = await sendSignedXmlToSRIReception({ url: receptionUrl, signedXml });
 
       if (reception.kind === "DEVUELTA") {
         if (hasRegisteredAccessKeyMessage(reception.messages)) {
@@ -206,18 +228,40 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
       }
     }
 
-    const authorization = await querySRIAuthorization({
-      url: config.sriTestAuthorizationUrl!,
-      accessKey,
-    });
+    const authorization = await querySRIAuthorization({ url: authorizationUrl, accessKey });
 
     if (authorization.kind === "AUTORIZADO") {
+      // Guardar XML de autorización en filesystem (best-effort — no bloquea si falla)
+      let authorizedXmlStorageKey: string | null = null;
+      if (config.authorizedXmlStoragePath) {
+        try {
+          const saved = saveAuthorizedXml(
+            config.authorizedXmlStoragePath,
+            job.tenantId,
+            job.documentId,
+            authorization.rawXml
+          );
+          authorizedXmlStorageKey = saved.storageKey;
+          logger.info("XML autorizado guardado.", {
+            jobId: job.id,
+            storageKey: authorizedXmlStorageKey,
+            byteLength: saved.byteLength,
+          });
+        } catch (saveErr) {
+          logger.warn("No se pudo guardar el XML autorizado. El job continúa.", {
+            jobId: job.id,
+            error: saveErr instanceof Error ? saveErr.message : String(saveErr),
+          });
+        }
+      }
+
       await markSubmissionAuthorized({
         jobId: job.id,
         sriAuthorizationStatus: authorization.status,
         sriAuthorizationNumber: authorization.authorizationNumber,
         sriAccessKey: authorization.accessKey,
         authorizedAt: authorization.authorizedAt,
+        authorizedXmlStorageKey,
         sriResponseRaw: {
           phase: "autorizacion",
           status: authorization.status,
@@ -225,6 +269,17 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
           messages: authorization.messages,
         },
       });
+
+      logger.info("Comprobante AUTORIZADO por el SRI.", {
+        jobId: job.id,
+        documentId: job.documentId,
+        tenantId: job.tenantId,
+        accessKey: accessKey.slice(0, 12) + "...",
+        authorizationNumber: authorization.authorizationNumber,
+        authorizedAt: authorization.authorizedAt.toISOString(),
+        environment: doc.environment,
+      });
+
       return { outcome: "claimed", jobId: job.id, result: "authorized" };
     }
 

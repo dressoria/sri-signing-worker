@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { PoolClient } from "pg";
 
 import { query, withTransaction } from "./db";
@@ -207,8 +208,9 @@ export async function markSubmissionAuthorized(params: {
   sriAccessKey: string;
   authorizedAt: Date;
   sriResponseRaw: unknown;
+  authorizedXmlStorageKey?: string | null;
 }): Promise<SubmissionJob> {
-  const now = params.authorizedAt.toISOString();
+  const finishedAt = new Date().toISOString();
 
   return withTransaction(async (client: PoolClient) => {
     const updated = await client.query<RawSubmissionJobRow>(
@@ -223,17 +225,19 @@ export async function markSubmissionAuthorized(params: {
          "sriAuthorizationNumber" = $4,
          "sriAccessKey" = $5,
          "sriResponseRaw" = $6::jsonb,
+         "authorizedXmlStorageKey" = COALESCE($8, "authorizedXmlStorageKey"),
          "updatedAt" = $1
        WHERE id = $7 AND status = 'RUNNING'
        RETURNING *`,
       [
-        new Date().toISOString(),
-        now,
+        finishedAt,
+        params.authorizedAt.toISOString(),
         params.sriAuthorizationStatus,
         params.sriAuthorizationNumber,
         params.sriAccessKey,
         JSON.stringify(params.sriResponseRaw),
         params.jobId,
+        params.authorizedXmlStorageKey ?? null,
       ]
     );
 
@@ -246,7 +250,7 @@ export async function markSubmissionAuthorized(params: {
       `UPDATE "SriDocument"
        SET status = 'AUTHORIZED', "updatedAt" = $1
        WHERE id = $2 AND "tenantId" = $3`,
-      [new Date().toISOString(), job.documentId, job.tenantId]
+      [finishedAt, job.documentId, job.tenantId]
     );
 
     return mapJob(job);
@@ -303,6 +307,58 @@ export async function markSubmissionRejected(params: {
     );
 
     return mapJob(job);
+  });
+}
+
+export async function createSubmissionJobAfterSigning(params: {
+  tenantId: string;
+  documentId: string;
+  environment: "TEST" | "PRODUCTION";
+  sriAccessKey: string | null;
+}): Promise<void> {
+  const existing = await query<{ id: string }>(
+    `SELECT id FROM "SriSubmissionJob"
+     WHERE "documentId" = $1 AND "tenantId" = $2
+       AND status IN ('QUEUED', 'RUNNING', 'RECEIVED', 'AUTHORIZED')
+     LIMIT 1`,
+    [params.documentId, params.tenantId]
+  );
+
+  if (existing.length > 0) {
+    logger.info("Submission job ya existe para este documento.", {
+      documentId: params.documentId,
+      existingJobId: existing[0]!.id,
+    });
+    return;
+  }
+
+  const docRows = await query<{ status: string }>(
+    `SELECT status FROM "SriDocument" WHERE id = $1 AND "tenantId" = $2`,
+    [params.documentId, params.tenantId]
+  );
+
+  const doc = docRows[0];
+  if (!doc || doc.status !== "SIGNED") {
+    logger.warn("No se creó submission job: documento no en estado SIGNED.", {
+      documentId: params.documentId,
+      status: doc?.status ?? "no encontrado",
+    });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  await query(
+    `INSERT INTO "SriSubmissionJob"
+      (id, "tenantId", "documentId", environment, status, priority, attempts, "maxAttempts", "sriAccessKey", "createdAt", "updatedAt")
+     VALUES ($1, $2, $3, $4, 'QUEUED', 5, 0, 3, $5, NOW(), NOW())`,
+    [id, params.tenantId, params.documentId, params.environment, params.sriAccessKey]
+  );
+
+  logger.info("Submission job creado automaticamente despues de firma exitosa.", {
+    submissionJobId: id,
+    documentId: params.documentId,
+    tenantId: params.tenantId,
+    environment: params.environment,
   });
 }
 

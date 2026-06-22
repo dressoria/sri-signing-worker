@@ -1,12 +1,12 @@
 /**
- * Helpers puros para generación de XML SRI Ecuador.
- * Lógica duplicada del dashboard — el worker es un proceso separado y no importa
- * desde Next.js. Mantener sincronizado manualmente con lib/core/sri-access-key.ts.
+ * Generación de XML para facturas electrónicas SRI Ecuador.
+ * Proceso separado del dashboard — mantener sincronizado con lib/core/sri-xml.ts.
+ * Versión del comprobante: factura 1.1.0 (ficha técnica SRI vigente).
  */
 
 import { createHash } from "crypto";
 
-// ── Tipos de datos del documento ─────────────────────────────────────────────
+// ── Tipos ─────────────────────────────────────────────────────────────────────
 
 export type SriDocumentData = {
   id: string;
@@ -30,7 +30,10 @@ export type SriProfileData = {
   ruc: string;
   legalName: string;
   tradeName: string | null;
+  dirMatriz: string | null;
   environment: "TEST" | "PRODUCTION";
+  accountingRequired: boolean;
+  contribuyenteRimpe: string | null;
 };
 
 export type SriEstablishmentData = {
@@ -55,14 +58,31 @@ export type SriDocumentLineData = {
   total: string;
 };
 
-// ── Acceso a clave ────────────────────────────────────────────────────────────
+// ── Utilidades ────────────────────────────────────────────────────────────────
 
-function formatSriDate(date: Date): string {
-  const day = String(date.getDate()).padStart(2, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const year = String(date.getFullYear());
-  return `${day}${month}${year}`;
+function pad(n: number, digits: number): string {
+  return String(n).padStart(digits, "0");
 }
+
+function dec(value: string | number, digits = 2): string {
+  return Number(value).toFixed(digits);
+}
+
+function esc(val: string | null | undefined): string {
+  if (!val) return "";
+  return val
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function formatDateEC(date: Date): string {
+  return `${pad(date.getDate(), 2)}/${pad(date.getMonth() + 1, 2)}/${date.getFullYear()}`;
+}
+
+// ── Clave de acceso ───────────────────────────────────────────────────────────
 
 function getSriDocumentCode(type: string): string {
   const codes: Record<string, string> = {
@@ -75,10 +95,6 @@ function getSriDocumentCode(type: string): string {
   const code = codes[type];
   if (!code) throw new Error(`Tipo de documento SRI no soportado: ${type}`);
   return code;
-}
-
-function formatSequential(n: number): string {
-  return String(n).padStart(9, "0");
 }
 
 function stableNumericCode(documentId: string): string {
@@ -106,7 +122,7 @@ export function buildDisplayNumber(
   issuePointCode: string,
   sequential: number
 ): string {
-  return `${establishmentCode}-${issuePointCode}-${formatSequential(sequential)}`;
+  return `${establishmentCode}-${issuePointCode}-${pad(sequential, 9)}`;
 }
 
 export function buildAccessKey(params: {
@@ -122,8 +138,8 @@ export function buildAccessKey(params: {
   const numericCode = stableNumericCode(params.documentId);
   const envCode = params.environment === "PRODUCTION" ? "2" : "1";
   const docCode = getSriDocumentCode(params.documentType);
-  const dateStr = formatSriDate(params.issuedAt);
-  const sequential = formatSequential(params.sequentialNumber);
+  const dateStr = `${pad(params.issuedAt.getDate(), 2)}${pad(params.issuedAt.getMonth() + 1, 2)}${params.issuedAt.getFullYear()}`;
+  const sequential = pad(params.sequentialNumber, 9);
 
   const base48 = `${dateStr}${docCode}${params.ruc}${envCode}${params.establishmentCode}${params.issuePointCode}${sequential}${numericCode}1`;
 
@@ -134,19 +150,33 @@ export function buildAccessKey(params: {
   return `${base48}${modulo11CheckDigit(base48)}`;
 }
 
-// ── Escape XML ────────────────────────────────────────────────────────────────
+// ── Resolución de identificación del comprador ────────────────────────────────
 
-function esc(val: string | null | undefined): string {
-  if (!val) return "";
-  return val
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+function resolveIdentificacion(identification: string | null): {
+  tipo: string;
+  valor: string;
+} {
+  if (!identification || !identification.trim()) {
+    return { tipo: "07", valor: "9999999999999" }; // Consumidor Final
+  }
+  const id = identification.trim();
+  if (/^\d{13}$/.test(id)) return { tipo: "04", valor: id }; // RUC
+  if (/^\d{10}$/.test(id)) return { tipo: "05", valor: id }; // Cédula
+  return { tipo: "06", valor: id }; // Pasaporte / exterior
 }
 
-// ── Generador XML preliminar (sin firma) ──────────────────────────────────────
+// ── codigoPorcentaje IVA (catálogo SRI) ──────────────────────────────────────
+
+function resolveIvaCodigoPorcentaje(taxRate: string): string {
+  const rate = Number(taxRate);
+  if (rate === 0) return "0";  // 0%
+  if (rate === 5) return "5";  // 5% (bienes específicos)
+  if (rate === 12) return "2"; // 12% (tarifa histórica)
+  if (rate === 15) return "4"; // 15% (tarifa vigente desde 2024)
+  return "2"; // default: IVA general
+}
+
+// ── XML preliminar (sin firma) ────────────────────────────────────────────────
 
 export function buildPreliminaryXml(params: {
   doc: SriDocumentData;
@@ -157,61 +187,92 @@ export function buildPreliminaryXml(params: {
   accessKey: string;
   displayNumber: string;
 }): string {
-  const { doc, profile, establishment, issuePoint, lines, accessKey, displayNumber } = params;
+  const { doc, profile, establishment, issuePoint, lines, accessKey } = params;
 
   if (doc.sequentialNumber == null) {
     throw new Error("MISSING_PERSISTED_SEQUENCE: El documento no tiene sequentialNumber persistido.");
   }
 
   const issuedAt = doc.issuedAt ?? doc.createdAt;
-  const fechaEmision = `${String(issuedAt.getDate()).padStart(2, "0")}/${String(issuedAt.getMonth() + 1).padStart(2, "0")}/${issuedAt.getFullYear()}`;
+  const fechaEmision = formatDateEC(issuedAt);
+  const { tipo: tipoIdComprador, valor: idComprador } = resolveIdentificacion(doc.customerIdentification);
+  const ambiente = doc.environment === "PRODUCTION" ? "2" : "1";
+  const dirMatriz = esc(profile.dirMatriz ?? establishment.address);
 
-  const totalSinImpuestos = Number(doc.subtotal).toFixed(2);
-  const totalDescuento = Number(doc.discountTotal).toFixed(2);
-  const totalIva = Number(doc.taxTotal).toFixed(2);
-  const importeTotal = Number(doc.grandTotal).toFixed(2);
+  const totalSinImpuestos = dec(doc.subtotal);
+  const totalDescuento = dec(doc.discountTotal);
+  const importeTotal = dec(doc.grandTotal);
 
+  // Agrupar impuestos por tasa para totalConImpuestos
+  const taxMap = new Map<string, { codigoPorcentaje: string; tarifa: string; baseImponible: number; valor: number }>();
+  for (const line of lines) {
+    const cp = resolveIvaCodigoPorcentaje(line.taxRate);
+    const key = cp;
+    const base = Number(line.subtotal);
+    const tax = Number(line.taxAmount);
+    const existing = taxMap.get(key);
+    if (existing) {
+      existing.baseImponible += base;
+      existing.valor += tax;
+    } else {
+      taxMap.set(key, { codigoPorcentaje: cp, tarifa: dec(line.taxRate), baseImponible: base, valor: tax });
+    }
+  }
+
+  const totalImpuestosXml = Array.from(taxMap.values())
+    .map(
+      (g) => `      <totalImpuesto>
+        <codigo>2</codigo>
+        <codigoPorcentaje>${g.codigoPorcentaje}</codigoPorcentaje>
+        <baseImponible>${dec(g.baseImponible)}</baseImponible>
+        <valor>${dec(g.valor)}</valor>
+      </totalImpuesto>`
+    )
+    .join("\n");
+
+  // Detalle de líneas
   const linesXml = lines
     .map((l, idx) => {
-      const precioUnitario = Number(l.unitPrice).toFixed(6);
-      const cantidad = Number(l.quantity).toFixed(6);
-      const precioTotalSinImpuesto = Number(l.subtotal).toFixed(2);
-      const descuento = Number(l.discountAmount).toFixed(2);
-      const codigoPrincipal = l.itemCode ? `<codigoPrincipal>${esc(l.itemCode)}</codigoPrincipal>` : "";
-      const codigoAdicional = "";
-      const tarifaIva = Number(l.taxRate).toFixed(0);
-      const baseImponibleIva = Number(l.subtotal).toFixed(2);
-      const valorIva = Number(l.taxAmount).toFixed(2);
-
+      const cp = resolveIvaCodigoPorcentaje(l.taxRate);
+      const codigoPrincipal = l.itemCode
+        ? `<codigoPrincipal>${esc(l.itemCode)}</codigoPrincipal>\n      `
+        : `<codigoPrincipal>ITEM-${pad(idx + 1, 3)}</codigoPrincipal>\n      `;
       return `    <detalle>
-      ${codigoPrincipal}
-      ${codigoAdicional}
-      <descripcion>${esc(l.itemName)}</descripcion>
-      <cantidad>${cantidad}</cantidad>
-      <precioUnitario>${precioUnitario}</precioUnitario>
-      <descuento>${descuento}</descuento>
-      <precioTotalSinImpuesto>${precioTotalSinImpuesto}</precioTotalSinImpuesto>
+      ${codigoPrincipal}<descripcion>${esc(l.itemName)}</descripcion>
+      <cantidad>${dec(l.quantity, 6)}</cantidad>
+      <precioUnitario>${dec(l.unitPrice, 6)}</precioUnitario>
+      <descuento>${dec(l.discountAmount)}</descuento>
+      <precioTotalSinImpuesto>${dec(l.subtotal)}</precioTotalSinImpuesto>
       <impuestos>
         <impuesto>
           <codigo>2</codigo>
-          <codigoPorcentaje>${tarifaIva === "0" ? "0" : tarifaIva === "5" ? "5" : "2"}</codigoPorcentaje>
-          <tarifa>${tarifaIva}</tarifa>
-          <baseImponible>${baseImponibleIva}</baseImponible>
-          <valor>${valorIva}</valor>
+          <codigoPorcentaje>${cp}</codigoPorcentaje>
+          <tarifa>${dec(l.taxRate)}</tarifa>
+          <baseImponible>${dec(l.subtotal)}</baseImponible>
+          <valor>${dec(l.taxAmount)}</valor>
         </impuesto>
       </impuestos>
-    </detalle>
-    <!-- linea ${idx + 1} -->`;
+    </detalle>`;
     })
     .join("\n");
 
+  // infoAdicional (campos opcionales)
+  const infoAdicionalItems: string[] = [];
+  if (doc.customerEmail) {
+    infoAdicionalItems.push(`    <campoAdicional nombre="email">${esc(doc.customerEmail)}</campoAdicional>`);
+  }
+  infoAdicionalItems.push(`    <campoAdicional nombre="Sistema">Appsolux</campoAdicional>`);
+  const infoAdicionalXml = `  <infoAdicional>\n${infoAdicionalItems.join("\n")}\n  </infoAdicional>`;
+
+  // contribuyenteRimpe: se incluye solo si el perfil lo tiene configurado
+  const contribuyenteRimpeXml = profile.contribuyenteRimpe
+    ? `\n    <contribuyenteRimpe>${esc(profile.contribuyenteRimpe)}</contribuyenteRimpe>`
+    : "";
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<!-- BORRADOR PRELIMINAR — SIN FIRMA ELECTRONICA — Appsolux sri-signing-worker -->
-<!-- accessKey: ${accessKey} -->
-<!-- displayNumber: ${displayNumber} -->
-<factura id="comprobante" version="1.0.0">
+<factura id="comprobante" version="1.1.0">
   <infoTributaria>
-    <ambiente>${doc.environment === "PRODUCTION" ? "2" : "1"}</ambiente>
+    <ambiente>${ambiente}</ambiente>
     <tipoEmision>1</tipoEmision>
     <razonSocial>${esc(profile.legalName)}</razonSocial>
     <nombreComercial>${esc(profile.tradeName ?? profile.legalName)}</nombreComercial>
@@ -220,36 +281,36 @@ export function buildPreliminaryXml(params: {
     <codDoc>${getSriDocumentCode(doc.documentType)}</codDoc>
     <estab>${esc(establishment.code)}</estab>
     <ptoEmi>${esc(issuePoint.code)}</ptoEmi>
-    <secuencial>${formatSequential(doc.sequentialNumber)}</secuencial>
-    <dirMatriz>${esc(establishment.address)}</dirMatriz>
+    <secuencial>${pad(doc.sequentialNumber, 9)}</secuencial>
+    <dirMatriz>${dirMatriz}</dirMatriz>
   </infoTributaria>
   <infoFactura>
     <fechaEmision>${fechaEmision}</fechaEmision>
     <dirEstablecimiento>${esc(establishment.address)}</dirEstablecimiento>
-    <tipoIdentificacionComprador>04</tipoIdentificacionComprador>
+    <obligadoContabilidad>${profile.accountingRequired ? "SI" : "NO"}</obligadoContabilidad>${contribuyenteRimpeXml}
+    <tipoIdentificacionComprador>${tipoIdComprador}</tipoIdentificacionComprador>
     <razonSocialComprador>${esc(doc.customerName)}</razonSocialComprador>
-    <identificacionComprador>${esc(doc.customerIdentification ?? "9999999999999")}</identificacionComprador>
+    <identificacionComprador>${esc(idComprador)}</identificacionComprador>
     <totalSinImpuestos>${totalSinImpuestos}</totalSinImpuestos>
     <totalDescuento>${totalDescuento}</totalDescuento>
     <totalConImpuestos>
-      <totalImpuesto>
-        <codigo>2</codigo>
-        <codigoPorcentaje>2</codigoPorcentaje>
-        <baseImponible>${totalSinImpuestos}</baseImponible>
-        <valor>${totalIva}</valor>
-      </totalImpuesto>
+${totalImpuestosXml}
     </totalConImpuestos>
     <propina>0.00</propina>
     <importeTotal>${importeTotal}</importeTotal>
-    <moneda>${doc.currency}</moneda>
+    <moneda>${esc(doc.currency || "DOLAR")}</moneda>
+    <pagos>
+      <pago>
+        <formaPago>01</formaPago>
+        <total>${importeTotal}</total>
+        <plazo>0</plazo>
+        <unidadTiempo>dias</unidadTiempo>
+      </pago>
+    </pagos>
   </infoFactura>
   <detalles>
 ${linesXml}
   </detalles>
-  <infoAdicional>
-    <campoAdicional nombre="Email">${esc(doc.customerEmail ?? "")}</campoAdicional>
-    <campoAdicional nombre="Sistema">Appsolux</campoAdicional>
-  </infoAdicional>
-</factura>
-`;
+  ${infoAdicionalXml}
+</factura>`;
 }
