@@ -40,6 +40,17 @@ export type SubmissionJob = {
   updatedAt: Date;
 };
 
+export type SubmissionRecoveryTarget = {
+  documentId: string;
+  tenantId: string;
+  accessKey: string | null;
+  environment: "TEST" | "PRODUCTION";
+  documentStatus: string;
+  submissionJobId: string | null;
+  submissionJobStatus: SubmissionJobStatus | null;
+  authorizedXmlStorageKey: string | null;
+};
+
 type RawSubmissionJobRow = {
   id: string;
   tenantId: string;
@@ -95,6 +106,17 @@ function mapJob(row: RawSubmissionJobRow): SubmissionJob {
     updatedAt: new Date(row.updatedAt),
   };
 }
+
+type RecoveryRow = {
+  documentId: string;
+  tenantId: string;
+  accessKey: string | null;
+  environment: "TEST" | "PRODUCTION";
+  documentStatus: string;
+  submissionJobId: string | null;
+  submissionJobStatus: SubmissionJobStatus | null;
+  authorizedXmlStorageKey: string | null;
+};
 
 export async function listQueuedSubmissionJobs(limit = 10): Promise<SubmissionJob[]> {
   const now = new Date().toISOString();
@@ -359,6 +381,118 @@ export async function createSubmissionJobAfterSigning(params: {
     documentId: params.documentId,
     tenantId: params.tenantId,
     environment: params.environment,
+  });
+}
+
+function mapRecoveryTarget(row: RecoveryRow): SubmissionRecoveryTarget {
+  return {
+    documentId: row.documentId,
+    tenantId: row.tenantId,
+    accessKey: row.accessKey,
+    environment: row.environment,
+    documentStatus: row.documentStatus,
+    submissionJobId: row.submissionJobId,
+    submissionJobStatus: row.submissionJobStatus,
+    authorizedXmlStorageKey: row.authorizedXmlStorageKey,
+  };
+}
+
+export async function findSubmissionRecoveryTarget(params: {
+  documentId?: string;
+  accessKey?: string;
+}): Promise<SubmissionRecoveryTarget | null> {
+  if (!params.documentId && !params.accessKey) {
+    throw new Error("Se requiere documentId o accessKey para recovery.");
+  }
+
+  const rows = await query<RecoveryRow>(
+    `SELECT
+       d.id AS "documentId",
+       d."tenantId" AS "tenantId",
+       d."accessKey" AS "accessKey",
+       d.environment AS environment,
+       d.status AS "documentStatus",
+       sj.id AS "submissionJobId",
+       sj.status AS "submissionJobStatus",
+       sj."authorizedXmlStorageKey" AS "authorizedXmlStorageKey"
+     FROM "SriDocument" d
+     LEFT JOIN LATERAL (
+       SELECT id, status, "authorizedXmlStorageKey"
+       FROM "SriSubmissionJob"
+       WHERE "documentId" = d.id
+       ORDER BY "createdAt" DESC
+       LIMIT 1
+     ) sj ON true
+     WHERE ($1::text IS NULL OR d.id = $1)
+       AND ($2::text IS NULL OR d."accessKey" = $2)
+     ORDER BY d."createdAt" DESC
+     LIMIT 1`,
+    [params.documentId ?? null, params.accessKey ?? null]
+  );
+
+  if (rows.length === 0) {
+    return null;
+  }
+
+  return mapRecoveryTarget(rows[0]!);
+}
+
+export async function recoverSubmissionAuthorized(params: {
+  documentId: string;
+  tenantId: string;
+  accessKey: string;
+  authorizationNumber: string;
+  authorizedAt: Date;
+  sriResponseRaw: unknown;
+  authorizedXmlStorageKey?: string | null;
+}): Promise<void> {
+  const now = new Date().toISOString();
+
+  await withTransaction(async (client: PoolClient) => {
+    await client.query(
+      `UPDATE "SriDocument"
+       SET status = 'AUTHORIZED', "updatedAt" = $1
+       WHERE id = $2 AND "tenantId" = $3`,
+      [now, params.documentId, params.tenantId]
+    );
+
+    const latestSubmission = await client.query<{ id: string }>(
+      `SELECT id
+       FROM "SriSubmissionJob"
+       WHERE "documentId" = $1 AND "tenantId" = $2
+       ORDER BY "createdAt" DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [params.documentId, params.tenantId]
+    );
+
+    if (latestSubmission.rows.length > 0) {
+      await client.query(
+        `UPDATE "SriSubmissionJob"
+         SET
+           status = 'AUTHORIZED',
+           "finishedAt" = COALESCE("finishedAt", $1),
+           "authorizedAt" = $2,
+           "lockedAt" = NULL,
+           "lockedBy" = NULL,
+           "sriAuthorizationStatus" = 'AUTORIZADO',
+           "sriAuthorizationNumber" = $3,
+           "sriAccessKey" = $4,
+           "sriResponseRaw" = $5::jsonb,
+           "authorizedXmlStorageKey" = COALESCE($6, "authorizedXmlStorageKey"),
+           "updatedAt" = $1
+         WHERE id = $7`,
+        [
+          now,
+          params.authorizedAt.toISOString(),
+          params.authorizationNumber,
+          params.accessKey,
+          JSON.stringify(params.sriResponseRaw),
+          params.authorizedXmlStorageKey ?? null,
+          latestSubmission.rows[0]!.id,
+        ]
+      );
+    }
   });
 }
 

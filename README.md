@@ -30,7 +30,6 @@ Worker de firma electrónica SRI para Appsolux. Procesa `SriSigningJob` de la ba
 
 ## Qué NO hace
 
-- **NO** envía a produccion SRI; solo soporta `TEST`.
 - **NO** genera RIDE oficial.
 - **NO** envía correos.
 - **NO** ejecuta en loop infinito (se usa con cron o manualmente).
@@ -85,6 +84,10 @@ npm run scan:submission
 
 # Procesar 1 submission job, luego terminar
 npm run submit:once
+
+# Recuperar autorizacion por documento o clave de acceso
+SRI_DOCUMENT_ID=... npm run recover:authorization
+ACCESS_KEY=... npm run recover:authorization
 
 # Type-check
 npm run typecheck
@@ -163,19 +166,38 @@ DB SriSigningJob { status: QUEUED }
 7. Ejecuta `npm run run:once`.
 8. Verifica el XML firmado en `SRI_SIGNED_XML_STORAGE_PATH`.
 
-## Submission SRI TEST
+## Submission SRI
 
 Cuando `ENABLE_SRI_TEST_SUBMISSION=true`, el worker tambien puede:
 
 1. Reclamar `SriSubmissionJob` en estado `QUEUED` o `RECEIVED`.
 2. Leer `signed.xml` desde `SRI_SIGNED_XML_STORAGE_PATH`.
-3. Enviar el XML firmado al web service de recepcion SRI TEST.
-4. Consultar autorizacion en el web service de autorizacion SRI TEST.
+3. Enviar el XML firmado al web service de recepcion SRI del ambiente del documento.
+4. Consultar autorizacion en el web service de autorizacion SRI del ambiente del documento.
 5. Actualizar `SriDocument.status` a `SENT`, `AUTHORIZED` o `REJECTED`.
+6. Si recepcion devuelve una respuesta ambigua, consultar autorizacion antes de cerrar el rechazo.
+7. Guardar `authorized.xml` cuando el comprobante queda `AUTORIZADO`.
+
+Cuando además `SRI_PRODUCTION_SUBMISSION_ENABLED=true`, el mismo flujo se habilita para comprobantes en `PRODUCTION`.
+
+## Recovery de autorizacion
+
+El comando `recover:authorization` consulta directamente autorizacion SRI por:
+
+- `SRI_DOCUMENT_ID`
+- `ACCESS_KEY`
+
+Si el SRI ya responde `AUTORIZADO`, el worker:
+
+- actualiza `SriDocument.status = AUTHORIZED`
+- actualiza el `SriSubmissionJob` más reciente a `AUTHORIZED`
+- persiste `sriAuthorizationStatus`, `sriAuthorizationNumber`, `authorizedAt`
+- guarda `authorized.xml`
+- preserva un `sriResponseRaw` útil para diagnóstico
 
 ## Limitaciones actuales
 
-- XAdES-BES implementado y fase `TEST` de submission habilitada, pero no cubre produccion SRI.
+- XAdES-BES implementado y submission SRI habilitada para `TEST` y `PRODUCTION` según flags.
 - No genera RIDE (próxima fase).
 - El loop de polling continuo no está implementado (ejecutar con cron o manualmente).
 

@@ -1,4 +1,4 @@
-import { hasRegisteredAccessKeyMessage } from "./sri-submission";
+import { hasAmbiguousReceptionMessage, hasRegisteredAccessKeyMessage } from "./sri-submission";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -44,6 +44,31 @@ function main(): void {
       },
     ]),
     "No debe marcar otros errores como acceso ya registrado"
+  );
+
+  assert(
+    hasAmbiguousReceptionMessage([
+      {
+        identificador: "65",
+        mensaje: "Mensaje no disponible",
+      },
+    ]),
+    "Debe tratar #65 / Mensaje no disponible como respuesta ambigua para consultar autorización"
+  );
+
+  assert(
+    hasAmbiguousReceptionMessage([]),
+    "Sin mensajes también debe considerarse ambiguo para evitar rechazo prematuro"
+  );
+
+  assert(
+    !hasAmbiguousReceptionMessage([
+      {
+        identificador: "70",
+        mensaje: "Comprobante invalido",
+      },
+    ]),
+    "Errores concretos no deben tratarse como ambigüedad"
   );
 
   console.log("SRI submission helper OK");

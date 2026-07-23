@@ -5,6 +5,7 @@ import { processNextSigningJob } from "./signing";
 import { logger } from "./logger";
 import { listQueuedSubmissionJobs } from "./sri-submission-jobs";
 import { processNextSubmissionJob } from "./sri-submission";
+import { runRecoverAuthorizationCommand } from "./sri-recovery";
 
 const command = process.argv[2] ?? "help";
 
@@ -149,6 +150,19 @@ async function cmdSubmitOnce(): Promise<void> {
   logger.info("=== SUBMIT:ONCE completado ===");
 }
 
+async function cmdRecoverAuthorization(): Promise<void> {
+  logger.info("=== RECOVER:AUTHORIZATION — consulta autorización SRI y corrige DB ===");
+
+  const connected = await testConnection();
+  if (!connected) {
+    logger.error("No se puede continuar — falla la conexión a PostgreSQL.");
+    process.exit(1);
+  }
+
+  await runRecoverAuthorizationCommand();
+  logger.info("=== RECOVER:AUTHORIZATION completado ===");
+}
+
 function printHelp(): void {
   console.log(`
 sri-signing-worker — Appsolux SRI job processor
@@ -160,6 +174,7 @@ Comandos disponibles:
   run:once    Reclama y procesa máximo 1 job, luego termina
   scan:submission   Lista jobs de envio SRI TEST pendientes
   submit:once       Reclama y procesa máximo 1 submission job, luego termina
+  recover:authorization  Consulta autorizacion por SRI_DOCUMENT_ID o ACCESS_KEY y recupera DB
 
 Uso:
   npm run check-env
@@ -167,6 +182,7 @@ Uso:
   npm run run:once
   npm run scan:submission
   npm run submit:once
+  SRI_DOCUMENT_ID=... npm run recover:authorization
 `);
 }
 
@@ -187,6 +203,9 @@ async function main(): Promise<void> {
         break;
       case "submit:once":
         await cmdSubmitOnce();
+        break;
+      case "recover:authorization":
+        await cmdRecoverAuthorization();
         break;
       default:
         printHelp();

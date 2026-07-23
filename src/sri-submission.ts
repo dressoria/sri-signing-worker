@@ -11,7 +11,12 @@ import {
   markSubmissionRejected,
   SubmissionJob,
 } from "./sri-submission-jobs";
-import { querySRIAuthorization, sendSignedXmlToSRIReception } from "./sri-webservice";
+import {
+  querySRIAuthorization,
+  sendSignedXmlToSRIReception,
+  summarizeAuthorizationForStorage,
+  summarizeReceptionForStorage,
+} from "./sri-webservice";
 
 type SRIStatusMessage = {
   mensaje: string;
@@ -106,6 +111,24 @@ export function hasRegisteredAccessKeyMessage(messages: SRIStatusMessage[]): boo
   });
 }
 
+export function hasAmbiguousReceptionMessage(messages: SRIStatusMessage[]): boolean {
+  if (messages.length === 0) {
+    return true;
+  }
+
+  return messages.every((message) => {
+    const mensaje = normalizeSriText(message.mensaje);
+    const informacionAdicional = normalizeSriText(message.informacionAdicional);
+
+    return (
+      message.identificador === "65" ||
+      mensaje === "" ||
+      mensaje === "mensaje no disponible" ||
+      informacionAdicional === "mensaje no disponible"
+    );
+  });
+}
+
 export type SubmissionProcessResult =
   | { outcome: "no_job" }
   | { outcome: "claimed"; jobId: string; result: "received" | "authorized" | "rejected" | "failed" | "in_progress" }
@@ -178,6 +201,12 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
     }
 
     const accessKey = doc.accessKey;
+    const sriResponseTrace: Record<string, unknown> = {
+      documentId: job.documentId,
+      jobId: job.id,
+      accessKey,
+      environment: doc.environment,
+    };
     const xmlAccessKey = extractAccessKeyFromXml(signedXml);
     if (!xmlAccessKey) {
       await markSubmissionFailed({
@@ -200,10 +229,14 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
 
     if (job.receivedAt == null) {
       const reception = await sendSignedXmlToSRIReception({ url: receptionUrl, signedXml });
+      sriResponseTrace.reception = summarizeReceptionForStorage(reception);
 
       if (reception.kind === "DEVUELTA") {
-        if (hasRegisteredAccessKeyMessage(reception.messages)) {
-          logger.info("Recepcion SRI devolvio #35 Clave de acceso registrada. Se consultara autorizacion.", {
+        if (
+          hasRegisteredAccessKeyMessage(reception.messages) ||
+          hasAmbiguousReceptionMessage(reception.messages)
+        ) {
+          logger.info("Recepcion SRI requiere verificacion por autorizacion antes de rechazar.", {
             jobId: job.id,
             accessKey,
             messages: reception.messages,
@@ -214,21 +247,24 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
             sriReceiptStatus: reception.status,
             sriAccessKey: accessKey,
             errorMessage: summarizeMessages(reception.messages),
-            sriResponseRaw: { phase: "recepcion", status: reception.status, messages: reception.messages },
+            sriResponseRaw: sriResponseTrace,
           });
           return { outcome: "claimed", jobId: job.id, result: "rejected" };
         }
-      } else {
+      }
+
+      if (reception.kind === "RECIBIDA") {
         await markSubmissionReceived({
           jobId: job.id,
           sriReceiptStatus: reception.status,
           sriAccessKey: accessKey,
-          sriResponseRaw: { phase: "recepcion", status: reception.status },
+          sriResponseRaw: sriResponseTrace,
         });
       }
     }
 
     const authorization = await querySRIAuthorization({ url: authorizationUrl, accessKey });
+    sriResponseTrace.authorization = summarizeAuthorizationForStorage(authorization);
 
     if (authorization.kind === "AUTORIZADO") {
       // Guardar XML de autorización en filesystem (best-effort — no bloquea si falla)
@@ -262,12 +298,7 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
         sriAccessKey: authorization.accessKey,
         authorizedAt: authorization.authorizedAt,
         authorizedXmlStorageKey,
-        sriResponseRaw: {
-          phase: "autorizacion",
-          status: authorization.status,
-          authorizationNumber: authorization.authorizationNumber,
-          messages: authorization.messages,
-        },
+        sriResponseRaw: sriResponseTrace,
       });
 
       logger.info("Comprobante AUTORIZADO por el SRI.", {
@@ -289,20 +320,21 @@ export async function processNextSubmissionJob(): Promise<SubmissionProcessResul
         sriAuthorizationStatus: authorization.status,
         sriAccessKey: authorization.accessKey,
         errorMessage: summarizeMessages(authorization.messages),
-        sriResponseRaw: {
-          phase: "autorizacion",
-          status: authorization.status,
-          messages: authorization.messages,
-        },
+        sriResponseRaw: sriResponseTrace,
       });
       return { outcome: "claimed", jobId: job.id, result: "rejected" };
     }
 
     await markSubmissionReceived({
       jobId: job.id,
-      sriReceiptStatus: "RECIBIDA",
+      sriReceiptStatus:
+        job.receivedAt == null
+          ? typeof (sriResponseTrace.reception as { status?: string } | undefined)?.status === "string"
+            ? ((sriResponseTrace.reception as { status: string }).status)
+            : "RECIBIDA"
+          : job.sriReceiptStatus ?? "RECIBIDA",
       sriAccessKey: authorization.accessKey,
-      sriResponseRaw: { phase: "autorizacion", status: authorization.status },
+      sriResponseRaw: sriResponseTrace,
       pollAfterMs: 60_000,
     });
     return { outcome: "claimed", jobId: job.id, result: "in_progress" };

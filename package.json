@@ -11,10 +11,12 @@
     "run:once": "ts-node src/index.ts run:once",
     "scan:submission": "ts-node src/index.ts scan:submission",
     "submit:once": "ts-node src/index.ts submit:once",
+    "recover:authorization": "ts-node src/index.ts recover:authorization",
     "check-env": "ts-node src/index.ts check-env",
     "test:xades-skeleton": "ts-node src/test-xades-skeleton.ts",
     "test:sri-soap-envelope": "ts-node src/test-sri-soap-envelope.ts",
-    "test:sri-submission": "ts-node src/test-sri-submission.ts"
+    "test:sri-submission": "ts-node src/test-sri-submission.ts",
+    "test:sri-soap-parser": "ts-node src/test-sri-soap-parser.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
