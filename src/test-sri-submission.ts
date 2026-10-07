@@ -1,4 +1,5 @@
 import { hasAmbiguousReceptionMessage, hasRegisteredAccessKeyMessage } from "./sri-submission";
+import { parseSRIReceptionResponse } from "./sri-webservice";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -8,13 +9,14 @@ function assert(condition: boolean, message: string): void {
 
 function main(): void {
   assert(
-    hasRegisteredAccessKeyMessage([
+    !hasRegisteredAccessKeyMessage([
       {
         identificador: "35",
-        mensaje: "Mensaje no disponible",
+        mensaje: "ARCHIVO NO CUMPLE ESTRUCTURA XML",
+        informacionAdicional: "cvc-complex-type.2.4.a: Invalid content",
       },
     ]),
-    "Debe detectar identificador 35 aunque el mensaje no venga completo"
+    "El identificador 35 no debe implicar clave registrada"
   );
 
   assert(
@@ -24,6 +26,25 @@ function main(): void {
       },
     ]),
     "Debe detectar el texto en mensaje sin depender de mayusculas"
+  );
+
+  const returned = parseSRIReceptionResponse(`
+    <respuestaRecepcionComprobante>
+      <estado>DEVUELTA</estado>
+      <comprobantes><comprobante><mensajes><mensaje>
+        <identificador>35</identificador>
+        <mensaje>ARCHIVO NO CUMPLE ESTRUCTURA XML</mensaje>
+        <informacionAdicional>cvc-complex-type.2.4.a: Invalid content</informacionAdicional>
+        <tipo>ERROR</tipo>
+      </mensaje></mensajes></comprobante></comprobantes>
+    </respuestaRecepcionComprobante>`);
+  assert(returned.kind === "DEVUELTA", "La respuesta debe conservar DEVUELTA");
+  assert(
+    returned.kind === "DEVUELTA" &&
+      returned.messages[0]?.mensaje === "ARCHIVO NO CUMPLE ESTRUCTURA XML" &&
+      !hasRegisteredAccessKeyMessage(returned.messages) &&
+      !hasAmbiguousReceptionMessage(returned.messages),
+    "El error estructural 35 debe conservarse y seguir la rama REJECTED"
   );
 
   assert(

@@ -97,10 +97,6 @@ function normalizeSriText(value: string | undefined): string {
 
 export function hasRegisteredAccessKeyMessage(messages: SRIStatusMessage[]): boolean {
   return messages.some((message) => {
-    if (message.identificador === "35") {
-      return true;
-    }
-
     const mensaje = normalizeSriText(message.mensaje);
     const informacionAdicional = normalizeSriText(message.informacionAdicional);
 

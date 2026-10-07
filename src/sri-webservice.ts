@@ -18,10 +18,6 @@ type AuthorizationMessage = {
 const SOAP_ENV_NAMESPACE = "http://schemas.xmlsoap.org/soap/envelope/";
 const SRI_RECEPCION_NAMESPACE = "http://ec.gob.sri.ws.recepcion";
 const SRI_AUTORIZACION_NAMESPACE = "http://ec.gob.sri.ws.autorizacion";
-const SRI_MESSAGE_BY_IDENTIFIER: Record<string, string> = {
-  "35": "Clave de acceso registrada",
-};
-
 export type SRIReceptionResult =
   | {
       kind: "RECIBIDA";
@@ -92,16 +88,19 @@ function extractAllBlocks(xml: string, tagName: string): string[] {
   ).map((match) => match[1] ?? "");
 }
 
-function parseMessages(blocks: string[]): ReceiptMessage[] {
+function parseMessages(xml: string): ReceiptMessage[] {
+  const identifierPattern = /<(?:\w+:)?identificador>/gi;
+  const starts = Array.from(xml.matchAll(identifierPattern), (match) => match.index);
+  const blocks = starts.map((start, index) =>
+    xml.slice(start, starts[index + 1] ?? xml.length)
+  );
   return blocks.map((block) => {
     const identificador = extractFirstTag(block, "identificador") ?? undefined;
     const rawMessage = extractFirstTag(block, "mensaje");
-    const mappedMessage =
-      identificador != null ? SRI_MESSAGE_BY_IDENTIFIER[identificador] : undefined;
     const mensaje =
       rawMessage && rawMessage !== "Mensaje no disponible"
         ? rawMessage
-        : mappedMessage ?? "Mensaje no disponible";
+        : "Mensaje no disponible";
 
     return {
       identificador,
@@ -230,7 +229,7 @@ export function parseSRIReceptionResponse(rawXml: string): SRIReceptionResult {
       kind: "DEVUELTA",
       status: "DEVUELTA",
       rawXml,
-      messages: parseMessages(extractAllBlocks(rawXml, "mensaje")),
+      messages: parseMessages(rawXml),
     };
   }
 
@@ -277,7 +276,7 @@ export function parseSRIAuthorizationResponse(
       accessKey,
       authorizedAt: new Date(extractFirstTag(first, "fechaAutorizacion") ?? new Date().toISOString()),
       rawXml,
-      messages: parseMessages(extractAllBlocks(first, "mensaje")),
+      messages: parseMessages(first),
     };
   }
 
@@ -287,7 +286,7 @@ export function parseSRIAuthorizationResponse(
       status: "NO AUTORIZADO",
       accessKey,
       rawXml,
-      messages: parseMessages(extractAllBlocks(first, "mensaje")),
+      messages: parseMessages(first),
     };
   }
 
