@@ -46,7 +46,11 @@ const line: SriDocumentLineData = {
   total: "1.15",
 };
 
-function build(profileOverrides: Partial<SriProfileData> = {}, lineOverrides: Partial<SriDocumentLineData> = {}) {
+function build(
+  profileOverrides: Partial<SriProfileData> = {},
+  lineOverrides: Partial<SriDocumentLineData> = {},
+  docOverrides: Partial<SriDocumentData> = {},
+) {
   const profile: SriProfileData = {
     ruc: "1751566751001",
     legalName: "EMISOR PRUEBA",
@@ -60,14 +64,15 @@ function build(profileOverrides: Partial<SriProfileData> = {}, lineOverrides: Pa
     companyPhone: "022345678",
     ...profileOverrides,
   };
+  const testDoc = { ...doc, ...docOverrides };
   const testLine = { ...line, ...lineOverrides };
   const xml = buildPreliminaryXml({
-    doc,
+    doc: testDoc,
     profile,
     establishment: { code: "001", name: "Matriz", address: "Quito" },
     issuePoint: { code: "001" },
     lines: [testLine],
-    accessKey: doc.accessKey!,
+    accessKey: testDoc.accessKey!,
     displayNumber: "001-001-000000305",
   });
   return { xml, profile };
@@ -177,6 +182,69 @@ function main(): void {
   // ── Verify no ITEM- anywhere ──
 
   assert(!general.xml.includes("ITEM-"), "No debe existir ITEM- en XML generado");
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PAYMENT METHOD TESTS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // ── Test PA: transfer + sriPaymentCode 20 ──
+
+  const testPA = build({}, {}, { commercialPaymentMethod: "transfer", sriPaymentCode: "20" });
+  assert(testPA.xml.includes("<formaPago>20</formaPago>"), "PA: formaPago debe ser 20");
+  assert(testPA.xml.includes('nombre="FORMA PAGO">TRANSFERENCIA'), "PA: FORMA PAGO debe ser TRANSFERENCIA");
+
+  // ── Test PB: cash + sriPaymentCode 01 ──
+
+  const testPB = build({}, {}, { commercialPaymentMethod: "cash", sriPaymentCode: "01" });
+  assert(testPB.xml.includes("<formaPago>01</formaPago>"), "PB: formaPago debe ser 01");
+  assert(testPB.xml.includes('nombre="FORMA PAGO">EFECTIVO'), "PB: FORMA PAGO debe ser EFECTIVO");
+
+  // ── Test PC: card + sriPaymentCode 19 ──
+
+  const testPC = build({}, {}, { commercialPaymentMethod: "card", sriPaymentCode: "19" });
+  assert(testPC.xml.includes("<formaPago>19</formaPago>"), "PC: formaPago debe ser 19");
+  assert(testPC.xml.includes('nombre="FORMA PAGO">TARJETA'), "PC: FORMA PAGO debe ser TARJETA");
+
+  // ── Test PD: transfer + manual override sriPaymentCode 16 ──
+
+  const testPD = build({}, {}, { commercialPaymentMethod: "transfer", sriPaymentCode: "16" });
+  assert(testPD.xml.includes("<formaPago>16</formaPago>"), "PD: formaPago debe respetar override manual 16");
+  assert(testPD.xml.includes('nombre="FORMA PAGO">TRANSFERENCIA'), "PD: FORMA PAGO sigue siendo TRANSFERENCIA");
+  assert(!testPD.xml.includes("<formaPago>20</formaPago>"), "PD: no debe recalcular a 20");
+
+  // ── Test PE: sriPaymentCode vacío = error ──
+
+  let threwPE = false;
+  try {
+    build({}, {}, { sriPaymentCode: null });
+  } catch (e: unknown) {
+    threwPE = true;
+    assert(
+      (e as Error).message.includes("SRI_PAYMENT_CODE_MISSING"),
+      "PE: error debe incluir SRI_PAYMENT_CODE_MISSING",
+    );
+  }
+  assert(threwPE, "PE: debe lanzar error cuando sriPaymentCode es null");
+
+  let threwPE2 = false;
+  try {
+    build({}, {}, { sriPaymentCode: "" });
+  } catch {
+    threwPE2 = true;
+  }
+  assert(threwPE2, "PE2: debe lanzar error cuando sriPaymentCode es vacío");
+
+  // ── Test PF: commercialPaymentMethod null = omit FORMA PAGO (historical) ──
+
+  const testPF = build({}, {}, { commercialPaymentMethod: null, sriPaymentCode: "20" });
+  assert(testPF.xml.includes("<formaPago>20</formaPago>"), "PF: formaPago sigue siendo 20");
+  assert(!testPF.xml.includes('nombre="FORMA PAGO"'), "PF: sin commercialPaymentMethod no genera FORMA PAGO");
+
+  // ── Test PG: default fixture uses transfer/20, not cash/01 ──
+
+  assert(general.xml.includes("<formaPago>20</formaPago>"), "PG: fixture default usa formaPago 20, no 01");
+  assert(!general.xml.includes("<formaPago>01</formaPago>"), "PG: no debe caer a fallback 01");
+  assert(general.xml.includes('nombre="FORMA PAGO">TRANSFERENCIA'), "PG: fixture default usa TRANSFERENCIA");
 
   console.log("SRI XML worker OK");
 }

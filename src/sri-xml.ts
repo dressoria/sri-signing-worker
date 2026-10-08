@@ -262,6 +262,10 @@ export function buildPreliminaryXml(params: {
     throw new Error("MISSING_PERSISTED_SEQUENCE: El documento no tiene sequentialNumber persistido.");
   }
 
+  if (!doc.sriPaymentCode?.trim()) {
+    throw new Error("SRI_PAYMENT_CODE_MISSING: El documento no tiene código de forma de pago SRI.");
+  }
+
   const issuedAt = doc.issuedAt ?? doc.createdAt;
   const fechaEmision = formatDateEC(issuedAt);
   const { tipo: tipoIdComprador, valor: idComprador } = resolveIdentificacion(doc.customerIdentification);
@@ -385,7 +389,7 @@ ${totalImpuestosXml}
     <moneda>${esc(doc.currency || "DOLAR")}</moneda>
     <pagos>
       <pago>
-        <formaPago>${esc(doc.sriPaymentCode ?? "01")}</formaPago>
+        <formaPago>${esc(doc.sriPaymentCode || "")}</formaPago>
         <total>${importeTotal}</total>
         <plazo>0</plazo>
         <unidadTiempo>dias</unidadTiempo>

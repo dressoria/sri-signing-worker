@@ -122,17 +122,14 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
               d."establishmentId", d."issuePointId", d."sequentialNumber",
               d."accessKey", d."customerName", d."customerIdentification",
               d."customerEmail", d."customerPhone", d."sriPaymentCode",
-              c.address AS "customerAddress", p.method AS "commercialPaymentMethod",
+              d."commercialPaymentMethod",
+              c.address AS "customerAddress",
               d.subtotal, d."taxTotal", d."discountTotal",
               d."grandTotal", d.currency, d."issuedAt", d."createdAt"
        FROM "SriDocument" d
        LEFT JOIN "LightweightSale" s
          ON d."sourceType" = 'BASIC_SALE' AND s.id = d."sourceId" AND s."tenantId" = d."tenantId"
        LEFT JOIN "LightweightCustomer" c ON c.id = s."customerId" AND c."tenantId" = d."tenantId"
-       LEFT JOIN LATERAL (
-         SELECT method FROM "LightweightPayment"
-         WHERE "saleId" = s.id ORDER BY "createdAt" ASC LIMIT 1
-       ) p ON true
        WHERE d.id = $1`,
       [job.documentId]
     ),
@@ -316,6 +313,16 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
         sequentialNumber: bundle.doc.sequentialNumber,
         hasAccessKey: Boolean(bundle.doc.accessKey),
       });
+      return { outcome: "claimed", jobId: job.id, result: "dry_run_failed" };
+    }
+
+    if (!bundle.doc.sriPaymentCode?.trim()) {
+      await markJobFailed(
+        job.id,
+        "SRI_PAYMENT_CODE_MISSING",
+        "El documento SRI no tiene código de forma de pago SRI asignado."
+      );
+      logger.warn("Job fallado: sriPaymentCode faltante", { jobId: job.id, documentId: job.documentId });
       return { outcome: "claimed", jobId: job.id, result: "dry_run_failed" };
     }
 
