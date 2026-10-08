@@ -67,14 +67,26 @@ function main(): void {
     "No debe marcar otros errores como acceso ya registrado"
   );
 
+  const extemporaneous = parseSRIReceptionResponse(`
+    <respuestaRecepcionComprobante>
+      <estado>DEVUELTA</estado>
+      <comprobantes><comprobante><mensajes><mensaje>
+        <identificador>65</identificador>
+        <mensaje>FECHA EMISION EXTEMPORANEA</mensaje>
+        <informacionAdicional>La fecha no corresponde al día de emisión</informacionAdicional>
+        <tipo>ERROR</tipo>
+      </mensaje></mensajes></comprobante></comprobantes>
+    </respuestaRecepcionComprobante>`);
   assert(
-    hasAmbiguousReceptionMessage([
-      {
-        identificador: "65",
-        mensaje: "Mensaje no disponible",
-      },
-    ]),
-    "Debe tratar #65 / Mensaje no disponible como respuesta ambigua para consultar autorización"
+    extemporaneous.kind === "DEVUELTA" &&
+      !hasRegisteredAccessKeyMessage(extemporaneous.messages) &&
+      !hasAmbiguousReceptionMessage(extemporaneous.messages),
+    "DEVUELTA #65 con mensaje real debe seguir la rama REJECTED"
+  );
+
+  assert(
+    hasAmbiguousReceptionMessage([{ identificador: "65", mensaje: "Mensaje no disponible" }]),
+    "Un mensaje realmente ausente puede consultarse como ambiguo sin importar el identificador"
   );
 
   assert(

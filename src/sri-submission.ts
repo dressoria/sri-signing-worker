@@ -115,13 +115,11 @@ export function hasAmbiguousReceptionMessage(messages: SRIStatusMessage[]): bool
   return messages.every((message) => {
     const mensaje = normalizeSriText(message.mensaje);
     const informacionAdicional = normalizeSriText(message.informacionAdicional);
+    const messageUnavailable = mensaje === "" || mensaje === "mensaje no disponible";
+    const additionalUnavailable =
+      informacionAdicional === "" || informacionAdicional === "mensaje no disponible";
 
-    return (
-      message.identificador === "65" ||
-      mensaje === "" ||
-      mensaje === "mensaje no disponible" ||
-      informacionAdicional === "mensaje no disponible"
-    );
+    return messageUnavailable && additionalUnavailable;
   });
 }
 

@@ -85,8 +85,33 @@ function esc(val: string | null | undefined): string {
     .replace(/'/g, "&apos;");
 }
 
-function formatDateEC(date: Date): string {
-  return `${pad(date.getDate(), 2)}/${pad(date.getMonth() + 1, 2)}/${date.getFullYear()}`;
+const ECUADOR_TIME_ZONE = "America/Guayaquil";
+const ECUADOR_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: ECUADOR_TIME_ZONE,
+  calendar: "gregory",
+  numberingSystem: "latn",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+});
+
+export function getEcuadorSriDateParts(date: Date): {
+  day: string;
+  month: string;
+  year: string;
+} {
+  if (Number.isNaN(date.getTime())) throw new Error("Fecha SRI inválida.");
+  const parts = Object.fromEntries(
+    ECUADOR_DATE_FORMATTER.formatToParts(date).map((part) => [part.type, part.value])
+  );
+  if (!parts.day || !parts.month || !parts.year)
+    throw new Error(`No se pudo convertir la fecha SRI a ${ECUADOR_TIME_ZONE}.`);
+  return { day: parts.day, month: parts.month, year: parts.year };
+}
+
+export function formatDateEC(date: Date): string {
+  const { day, month, year } = getEcuadorSriDateParts(date);
+  return `${day}/${month}/${year}`;
 }
 
 // ── Clave de acceso ───────────────────────────────────────────────────────────
@@ -145,7 +170,8 @@ export function buildAccessKey(params: {
   const numericCode = stableNumericCode(params.documentId);
   const envCode = params.environment === "PRODUCTION" ? "2" : "1";
   const docCode = getSriDocumentCode(params.documentType);
-  const dateStr = `${pad(params.issuedAt.getDate(), 2)}${pad(params.issuedAt.getMonth() + 1, 2)}${params.issuedAt.getFullYear()}`;
+  const { day, month, year } = getEcuadorSriDateParts(params.issuedAt);
+  const dateStr = `${day}${month}${year}`;
   const sequential = pad(params.sequentialNumber, 9);
 
   const base48 = `${dateStr}${docCode}${params.ruc}${envCode}${params.establishmentCode}${params.issuePointCode}${sequential}${numericCode}1`;

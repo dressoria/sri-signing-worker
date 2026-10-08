@@ -1,5 +1,7 @@
 import {
   buildPreliminaryXml,
+  buildAccessKey,
+  formatDateEC,
   SriDocumentData,
   SriDocumentLineData,
   SriProfileData,
@@ -71,12 +73,38 @@ function build(profileOverrides: Partial<SriProfileData> = {}) {
 }
 
 function main(): void {
+  const utcBoundary = new Date("2026-10-08T04:39:00Z");
+  assert(formatDateEC(utcBoundary) === "07/10/2026", "Debe usar fecha local de Ecuador");
+  const boundaryAccessKey = buildAccessKey({
+    issuedAt: utcBoundary,
+    documentType: "INVOICE",
+    ruc: "1751566751001",
+    environment: "PRODUCTION",
+    establishmentCode: "001",
+    issuePointCode: "001",
+    sequentialNumber: 306,
+    documentId: "timezone-test",
+  });
+  assert(boundaryAccessKey.startsWith("07102026"), "La clave debe iniciar con fecha Ecuador");
+
   const general = build();
   assert(!general.xml.includes("<contribuyenteRimpe>"), "Régimen general no debe generar nodo RIMPE");
   assert(general.xml.includes("<obligadoContabilidad>NO</obligadoContabilidad>"), "Debe emitir NO");
   assert(general.xml.includes("FACTUROM COM"), "Debe identificar a FACTUROM COM");
   assert(!general.xml.includes("Appsolux"), "No debe exponer Appsolux en el XML");
   assert(general.xml.includes('nombre="REGIMEN">CONTRIBUYENTE RÉGIMEN GENERAL'), "Debe incluir REGIMEN");
+
+  const boundaryXml = buildPreliminaryXml({
+    doc: { ...doc, issuedAt: utcBoundary, createdAt: utcBoundary, sequentialNumber: 306, accessKey: boundaryAccessKey },
+    profile: general.profile,
+    establishment: { code: "001", name: "Matriz", address: "Quito" },
+    issuePoint: { code: "001" },
+    lines: [line],
+    accessKey: boundaryAccessKey,
+    displayNumber: "001-001-000000306",
+  });
+  assert(boundaryXml.includes("<fechaEmision>07/10/2026</fechaEmision>"), "XML debe usar fecha Ecuador");
+  assert(boundaryXml.includes(`<claveAcceso>${boundaryAccessKey}</claveAcceso>`), "XML y clave deben compartir fecha");
 
   const rimpe = build({
     accountingRequired: true,
