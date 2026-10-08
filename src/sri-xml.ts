@@ -56,6 +56,7 @@ export type SriIssuePointData = {
 export type SriDocumentLineData = {
   itemName: string;
   itemCode: string | null;
+  itemAuxiliaryCode?: string | null;
   quantity: string;
   unitPrice: string;
   discountAmount: string;
@@ -300,13 +301,19 @@ export function buildPreliminaryXml(params: {
 
   // Detalle de líneas
   const linesXml = lines
-    .map((l, idx) => {
+    .map((l) => {
+      if (!l.itemCode?.trim()) {
+        throw new Error(
+          `SRI_ITEM_PRIMARY_CODE_MISSING: el producto "${l.itemName}" no tiene código principal.`,
+        );
+      }
       const cp = resolveIvaCodigoPorcentaje(l.taxRate);
-      const codigoPrincipal = l.itemCode
-        ? `<codigoPrincipal>${esc(l.itemCode)}</codigoPrincipal>\n      `
-        : `<codigoPrincipal>ITEM-${pad(idx + 1, 3)}</codigoPrincipal>\n      `;
+      const auxLine = l.itemAuxiliaryCode?.trim()
+        ? `\n      <codigoAuxiliar>${esc(l.itemAuxiliaryCode.trim())}</codigoAuxiliar>`
+        : "";
       return `    <detalle>
-      ${codigoPrincipal}<descripcion>${esc(l.itemName)}</descripcion>
+      <codigoPrincipal>${esc(l.itemCode.trim())}</codigoPrincipal>${auxLine}
+      <descripcion>${esc(l.itemName)}</descripcion>
       <cantidad>${dec(l.quantity, 6)}</cantidad>
       <precioUnitario>${dec(l.unitPrice, 6)}</precioUnitario>
       <descuento>${dec(l.discountAmount)}</descuento>

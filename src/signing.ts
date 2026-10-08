@@ -61,6 +61,7 @@ type DocumentRow = {
 type LineRow = {
   itemName: string;
   itemCode: string | null;
+  itemAuxiliaryCode: string | null;
   quantity: string;
   unitPrice: string;
   discountAmount: string;
@@ -136,7 +137,7 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
       [job.documentId]
     ),
     query<LineRow>(
-      `SELECT "itemName", "itemCode", quantity, "unitPrice", "discountAmount",
+      `SELECT "itemName", "itemCode", "itemAuxiliaryCode", quantity, "unitPrice", "discountAmount",
               subtotal, "taxRate", "taxAmount", total
        FROM "SriDocumentLine"
        WHERE "documentId" = $1
@@ -238,6 +239,7 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
   const lines: SriDocumentLineData[] = lineRows.map((l) => ({
     itemName: l.itemName,
     itemCode: l.itemCode,
+    itemAuxiliaryCode: l.itemAuxiliaryCode,
     quantity: l.quantity,
     unitPrice: l.unitPrice,
     discountAmount: l.discountAmount,
