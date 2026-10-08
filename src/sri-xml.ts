@@ -17,6 +17,10 @@ export type SriDocumentData = {
   customerName: string;
   customerIdentification: string | null;
   customerEmail: string | null;
+  customerPhone: string | null;
+  customerAddress: string | null;
+  commercialPaymentMethod: string | null;
+  sriPaymentCode: string | null;
   subtotal: string;
   taxTotal: string;
   discountTotal: string;
@@ -33,7 +37,10 @@ export type SriProfileData = {
   dirMatriz: string | null;
   environment: "TEST" | "PRODUCTION";
   accountingRequired: boolean;
+  taxRegimeCode: string | null;
   contribuyenteRimpe: string | null;
+  companyEmail: string | null;
+  companyPhone: string | null;
 };
 
 export type SriEstablishmentData = {
@@ -176,6 +183,41 @@ function resolveIvaCodigoPorcentaje(taxRate: string): string {
   return "2"; // default: IVA general
 }
 
+const FACTUROM_ELECTRONIC_BILLING_PROVIDER_RUC = "1793242481001";
+const FACTUROM_SYSTEM_NAME = "FACTUROM COM";
+const COMMERCIAL_PAYMENT_LABELS: Record<string, string> = {
+  cash: "EFECTIVO",
+  transfer: "TRANSFERENCIA",
+  card: "TARJETA",
+  credit: "CRÉDITO",
+};
+
+function resolveCommercialPaymentLabel(method: string | null): string {
+  return method ? (COMMERCIAL_PAYMENT_LABELS[method] ?? method.toUpperCase()) : "";
+}
+
+export function validateSriInvoiceXmlStructure(
+  xml: string,
+  taxRegimeCode: string | null
+): string[] {
+  const errors: string[] = [];
+  const infoTributaria = xml.match(/<infoTributaria>([\s\S]*?)<\/infoTributaria>/)?.[1] ?? "";
+  const infoFactura = xml.match(/<infoFactura>([\s\S]*?)<\/infoFactura>/)?.[1] ?? "";
+  const isRimpe = ["RIMPE_EMPRENDEDOR", "RIMPE_NEGOCIO_POPULAR"].includes(
+    taxRegimeCode ?? ""
+  );
+
+  if (/<contribuyenteRimpe>/.test(infoFactura))
+    errors.push("contribuyenteRimpe no puede estar dentro de infoFactura.");
+  if (isRimpe && !/<contribuyenteRimpe>/.test(infoTributaria))
+    errors.push("El régimen RIMPE requiere contribuyenteRimpe en infoTributaria.");
+  if (!isRimpe && /<contribuyenteRimpe>/.test(infoTributaria))
+    errors.push("contribuyenteRimpe solo corresponde a contribuyentes RIMPE.");
+  if (!/<obligadoContabilidad>(SI|NO)<\/obligadoContabilidad>/.test(infoFactura))
+    errors.push("obligadoContabilidad debe contener SI o NO dentro de infoFactura.");
+  return errors;
+}
+
 // ── XML preliminar (sin firma) ────────────────────────────────────────────────
 
 export function buildPreliminaryXml(params: {
@@ -257,15 +299,24 @@ export function buildPreliminaryXml(params: {
     .join("\n");
 
   // infoAdicional (campos opcionales)
-  const infoAdicionalItems: string[] = [];
-  if (doc.customerEmail) {
-    infoAdicionalItems.push(`    <campoAdicional nombre="email">${esc(doc.customerEmail)}</campoAdicional>`);
-  }
-  infoAdicionalItems.push(`    <campoAdicional nombre="Sistema">Appsolux</campoAdicional>`);
+  const additionalValues: Array<[string, string | null | undefined]> = [
+    ["REGIMEN", profile.contribuyenteRimpe],
+    ["RUC PROVEEDOR FACTURACIÓN ELECTRONICA", FACTUROM_ELECTRONIC_BILLING_PROVIDER_RUC],
+    ["SISTEMA", FACTUROM_SYSTEM_NAME],
+    ["EMAIL EMPRESA", profile.companyEmail],
+    ["TELEFONO EMPRESA", profile.companyPhone],
+    ["EMAIL CLIENTE", doc.customerEmail],
+    ["TELEFONO CLIENTE", doc.customerPhone],
+    ["DIRECCION CLIENTE", doc.customerAddress],
+    ["FORMA PAGO", resolveCommercialPaymentLabel(doc.commercialPaymentMethod)],
+  ];
+  const infoAdicionalItems = additionalValues
+    .filter((item): item is [string, string] => Boolean(item[1]?.trim()))
+    .map(([name, value]) => `    <campoAdicional nombre="${esc(name)}">${esc(value)}</campoAdicional>`);
   const infoAdicionalXml = `  <infoAdicional>\n${infoAdicionalItems.join("\n")}\n  </infoAdicional>`;
 
-  // contribuyenteRimpe: se incluye solo si el perfil lo tiene configurado
-  const contribuyenteRimpeXml = profile.contribuyenteRimpe
+  const contribuyenteRimpeXml = profile.contribuyenteRimpe &&
+    ["RIMPE_EMPRENDEDOR", "RIMPE_NEGOCIO_POPULAR"].includes(profile.taxRegimeCode ?? "")
     ? `\n    <contribuyenteRimpe>${esc(profile.contribuyenteRimpe)}</contribuyenteRimpe>`
     : "";
 
@@ -282,12 +333,12 @@ export function buildPreliminaryXml(params: {
     <estab>${esc(establishment.code)}</estab>
     <ptoEmi>${esc(issuePoint.code)}</ptoEmi>
     <secuencial>${pad(doc.sequentialNumber, 9)}</secuencial>
-    <dirMatriz>${dirMatriz}</dirMatriz>
+    <dirMatriz>${dirMatriz}</dirMatriz>${contribuyenteRimpeXml}
   </infoTributaria>
   <infoFactura>
     <fechaEmision>${fechaEmision}</fechaEmision>
     <dirEstablecimiento>${esc(establishment.address)}</dirEstablecimiento>
-    <obligadoContabilidad>${profile.accountingRequired ? "SI" : "NO"}</obligadoContabilidad>${contribuyenteRimpeXml}
+    <obligadoContabilidad>${profile.accountingRequired ? "SI" : "NO"}</obligadoContabilidad>
     <tipoIdentificacionComprador>${tipoIdComprador}</tipoIdentificacionComprador>
     <razonSocialComprador>${esc(doc.customerName)}</razonSocialComprador>
     <identificacionComprador>${esc(idComprador)}</identificacionComprador>
@@ -301,7 +352,7 @@ ${totalImpuestosXml}
     <moneda>${esc(doc.currency || "DOLAR")}</moneda>
     <pagos>
       <pago>
-        <formaPago>01</formaPago>
+        <formaPago>${esc(doc.sriPaymentCode ?? "01")}</formaPago>
         <total>${importeTotal}</total>
         <plazo>0</plazo>
         <unidadTiempo>dias</unidadTiempo>

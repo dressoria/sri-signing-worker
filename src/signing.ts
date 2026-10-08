@@ -14,6 +14,7 @@ import {
   SriEstablishmentData,
   SriIssuePointData,
   SriProfileData,
+  validateSriInvoiceXmlStructure,
 } from "./sri-xml";
 import { getConfig } from "./config";
 import { logger } from "./logger";
@@ -44,6 +45,10 @@ type DocumentRow = {
   customerName: string;
   customerIdentification: string | null;
   customerEmail: string | null;
+  customerPhone: string | null;
+  customerAddress: string | null;
+  commercialPaymentMethod: string | null;
+  sriPaymentCode: string | null;
   subtotal: string;
   taxTotal: string;
   discountTotal: string;
@@ -72,7 +77,10 @@ type ProfileRow = {
   dirMatriz: string | null;
   environment: "TEST" | "PRODUCTION";
   accountingRequired: boolean;
+  taxRegimeCode: string | null;
   contribuyenteRimpe: string | null;
+  companyEmail: string | null;
+  companyPhone: string | null;
 };
 
 type EstablishmentRow = {
@@ -112,9 +120,18 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
       `SELECT d.*, d."tenantId", d."documentType", d.status, d.environment,
               d."establishmentId", d."issuePointId", d."sequentialNumber",
               d."accessKey", d."customerName", d."customerIdentification",
-              d."customerEmail", d.subtotal, d."taxTotal", d."discountTotal",
+              d."customerEmail", d."customerPhone", d."sriPaymentCode",
+              c.address AS "customerAddress", p.method AS "commercialPaymentMethod",
+              d.subtotal, d."taxTotal", d."discountTotal",
               d."grandTotal", d.currency, d."issuedAt", d."createdAt"
        FROM "SriDocument" d
+       LEFT JOIN "LightweightSale" s
+         ON d."sourceType" = 'BASIC_SALE' AND s.id = d."sourceId" AND s."tenantId" = d."tenantId"
+       LEFT JOIN "LightweightCustomer" c ON c.id = s."customerId" AND c."tenantId" = d."tenantId"
+       LEFT JOIN LATERAL (
+         SELECT method FROM "LightweightPayment"
+         WHERE "saleId" = s.id ORDER BY "createdAt" ASC LIMIT 1
+       ) p ON true
        WHERE d.id = $1`,
       [job.documentId]
     ),
@@ -127,10 +144,12 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
       [job.documentId]
     ),
     query<ProfileRow>(
-      `SELECT ruc, "legalName", "tradeName", "dirMatriz", environment,
-              "accountingRequired", "contribuyenteRimpe"
-       FROM "SriTaxpayerProfile"
-       WHERE "tenantId" = $1`,
+      `SELECT p.ruc, p."legalName", p."tradeName", p."dirMatriz", p.environment,
+              p."accountingRequired", p."taxRegimeCode", p."contribuyenteRimpe",
+              t."contactEmail" AS "companyEmail", t.phone AS "companyPhone"
+       FROM "SriTaxpayerProfile" p
+       JOIN "Tenant" t ON t.id = p."tenantId"
+       WHERE p."tenantId" = $1`,
       [job.tenantId]
     ),
     query<SignatureConfigRow>(
@@ -169,7 +188,10 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
     dirMatriz: profileRow.dirMatriz,
     environment: profileRow.environment,
     accountingRequired: profileRow.accountingRequired ?? false,
+    taxRegimeCode: profileRow.taxRegimeCode,
     contribuyenteRimpe: profileRow.contribuyenteRimpe,
+    companyEmail: profileRow.companyEmail,
+    companyPhone: profileRow.companyPhone,
   };
 
   // Load establishment and issue point
@@ -200,6 +222,10 @@ async function loadDocumentBundle(job: SigningJob): Promise<DocumentBundle> {
     customerName: docRow.customerName,
     customerIdentification: docRow.customerIdentification,
     customerEmail: docRow.customerEmail,
+    customerPhone: docRow.customerPhone,
+    customerAddress: docRow.customerAddress,
+    commercialPaymentMethod: docRow.commercialPaymentMethod,
+    sriPaymentCode: docRow.sriPaymentCode,
     subtotal: docRow.subtotal,
     taxTotal: docRow.taxTotal,
     discountTotal: docRow.discountTotal,
@@ -309,6 +335,24 @@ export async function processNextSigningJob(): Promise<ProcessResult> {
       accessKey,
       displayNumber,
     });
+
+    const structuralErrors = validateSriInvoiceXmlStructure(
+      xmlContent,
+      bundle.profile.taxRegimeCode
+    );
+    if (structuralErrors.length) {
+      await markJobFailed(
+        job.id,
+        "SRI_XML_STRUCTURE_INVALID",
+        `XML SRI inválido: ${structuralErrors.join(" ")}`,
+        false
+      );
+      logger.error("Job fallado: XML SRI estructuralmente inválido.", {
+        jobId: job.id,
+        structuralErrors,
+      });
+      return { outcome: "claimed", jobId: job.id, result: "real_sign_failed" };
+    }
 
     const unsignedXmlHash = crypto
       .createHash("sha256")

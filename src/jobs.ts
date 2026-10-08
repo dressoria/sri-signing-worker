@@ -129,7 +129,8 @@ export async function claimNextSigningJob(workerId: string): Promise<SigningJob 
 export async function markJobFailed(
   jobId: string,
   errorCode: string,
-  errorMessage: string
+  errorMessage: string,
+  allowRetry = true
 ): Promise<SigningJob> {
   const now = new Date();
 
@@ -146,7 +147,7 @@ export async function markJobFailed(
   const job = rows[0]!;
   const attempts = Number(job.attempts);
   const maxAttempts = Number(job.maxAttempts);
-  const retryable = attempts < maxAttempts;
+  const retryable = allowRetry && attempts < maxAttempts;
 
   const runAfter = retryable
     ? new Date(now.getTime() + attempts * 60_000)
